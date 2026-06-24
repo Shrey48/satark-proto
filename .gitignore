@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+.env
+*.env
+
+# Node
+node_modules/
+dist/
+.next/
+.cache/
+
+# Docker
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Neo4j
+data/
+logs/
+
+# Sensitive
+*.pem
+*.key
+secrets/

@@ -1,0 +1,17 @@
+[
+  {"pattern": "request.GET",    "api_call": "HttpRequest.GET.__getitem__",                          "taint_class": "external_untrusted", "framework_name": "django",  "language": "python"},
+  {"pattern": "request.POST",   "api_call": "HttpRequest.POST.__getitem__",                         "taint_class": "external_untrusted", "framework_name": "django",  "language": "python"},
+  {"pattern": "request.data",   "api_call": "HttpRequest.data",                                     "taint_class": "external_untrusted", "framework_name": "django",  "language": "python"},
+  {"pattern": "request.body",   "api_call": "HttpRequest.body",                                     "taint_class": "external_untrusted", "framework_name": "django",  "language": "python"},
+  {"pattern": "request.args",   "api_call": "flask.request.args.get",                               "taint_class": "external_untrusted", "framework_name": "flask",   "language": "python"},
+  {"pattern": "request.form",   "api_call": "flask.request.form.get",                               "taint_class": "external_untrusted", "framework_name": "flask",   "language": "python"},
+  {"pattern": "request.json",   "api_call": "flask.request.json",                                   "taint_class": "external_untrusted", "framework_name": "flask",   "language": "python"},
+  {"pattern": "@RequestParam",  "api_call": "org.springframework.web.bind.annotation.RequestParam", "taint_class": "external_untrusted", "framework_name": "spring",  "language": "java"},
+  {"pattern": "@PathVariable",  "api_call": "org.springframework.web.bind.annotation.PathVariable", "taint_class": "external_untrusted", "framework_name": "spring",  "language": "java"},
+  {"pattern": "@RequestBody",   "api_call": "org.springframework.web.bind.annotation.RequestBody",  "taint_class": "external_untrusted", "framework_name": "spring",  "language": "java"},
+  {"pattern": "req.query",      "api_call": "express.Request.query",                                "taint_class": "external_untrusted", "framework_name": "express", "language": "javascript"},
+  {"pattern": "req.body",       "api_call": "express.Request.body",                                 "taint_class": "external_untrusted", "framework_name": "express", "language": "javascript"},
+  {"pattern": "req.params",     "api_call": "express.Request.params",                               "taint_class": "external_untrusted", "framework_name": "express", "language": "javascript"},
+  {"pattern": "params",         "api_call": "ActionController::Parameters",                         "taint_class": "external_untrusted", "framework_name": "rails",   "language": "ruby"},
+  {"pattern": "request.body",   "api_call": "ActionDispatch::Request.body",                         "taint_class": "external_untrusted", "framework_name": "rails",   "language": "ruby"}
+]

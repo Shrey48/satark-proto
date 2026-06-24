@@ -1,0 +1,11 @@
+[
+  {"signature_id": "UnauthorizedAccess:EC2/SSHBruteForce",                       "source_tool": "guardduty", "canonical_id": "CWE-307", "description": "SSH brute force attack detected on EC2 instance",          "confidence": 0.85},
+  {"signature_id": "UnauthorizedAccess:EC2/RDPBruteForce",                       "source_tool": "guardduty", "canonical_id": "CWE-307", "description": "RDP brute force attack detected on EC2 instance",          "confidence": 0.85},
+  {"signature_id": "Recon:EC2/PortProbeUnprotectedPort",                          "source_tool": "guardduty", "canonical_id": "CWE-200", "description": "Port probe on unprotected EC2 instance",                    "confidence": 0.60},
+  {"signature_id": "Policy:IAMUser/RootCredentialUsage",                          "source_tool": "guardduty", "canonical_id": "CWE-250", "description": "AWS root account credentials used",                         "confidence": 0.90},
+  {"signature_id": "PrivilegeEscalation:IAMUser/AdministrativePermissions",       "source_tool": "guardduty", "canonical_id": "CWE-269", "description": "IAM user granted administrative permissions",               "confidence": 0.85},
+  {"signature_id": "Stealth:IAMUser/CloudTrailLoggingDisabled",                   "source_tool": "guardduty", "canonical_id": "CWE-778", "description": "CloudTrail logging disabled",                               "confidence": 0.90},
+  {"signature_id": "CryptoCurrency:EC2/BitcoinTool.B",                            "source_tool": "guardduty", "canonical_id": "CWE-829", "description": "EC2 instance communicating with Bitcoin mining pool",        "confidence": 0.90},
+  {"signature_id": "UnauthorizedAccess:IAMUser/TorIPCaller",                      "source_tool": "guardduty", "canonical_id": "CWE-284", "description": "API calls from Tor exit node",                              "confidence": 0.75},
+  {"signature_id": "Discovery:S3/MaliciousIPCaller",                              "source_tool": "guardduty", "canonical_id": "CWE-200", "description": "S3 operations from known malicious IP",                     "confidence": 0.70}
+]

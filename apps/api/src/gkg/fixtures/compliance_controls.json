@@ -1,0 +1,12 @@
+[
+  {"framework": "PCI-DSS",    "control_id": "6.3.1", "control_name": "Security vulnerabilities are identified and managed",                  "obligation_level": "mandatory",    "source_version": "4.0",   "cwe_ids": ["CWE-89", "CWE-79", "CWE-78"]},
+  {"framework": "PCI-DSS",    "control_id": "6.2.4", "control_name": "Software development practices prevent introduction of vulnerabilities", "obligation_level": "mandatory",    "source_version": "4.0",   "cwe_ids": ["CWE-89", "CWE-79", "CWE-352"]},
+  {"framework": "PCI-DSS",    "control_id": "8.3.1", "control_name": "All user IDs and authentication factors are managed",                   "obligation_level": "mandatory",    "source_version": "4.0",   "cwe_ids": ["CWE-287", "CWE-307", "CWE-798"]},
+  {"framework": "HIPAA",      "control_id": "164.312(a)(1)",      "control_name": "Access Control — unique user identification",       "obligation_level": "mandatory",    "source_version": "2023",  "cwe_ids": ["CWE-284", "CWE-287"]},
+  {"framework": "HIPAA",      "control_id": "164.312(e)(1)",      "control_name": "Transmission Security — encrypt PHI in transit",    "obligation_level": "mandatory",    "source_version": "2023",  "cwe_ids": ["CWE-311", "CWE-319"]},
+  {"framework": "HIPAA",      "control_id": "164.312(a)(2)(iv)",  "control_name": "Encryption and decryption of stored PHI",           "obligation_level": "addressable",  "source_version": "2023",  "cwe_ids": ["CWE-312", "CWE-311"]},
+  {"framework": "SOC2",       "control_id": "CC6.1", "control_name": "Logical access security software, infrastructure and architectures", "obligation_level": "mandatory",    "source_version": "2017",  "cwe_ids": ["CWE-284", "CWE-269"]},
+  {"framework": "SOC2",       "control_id": "CC6.7", "control_name": "Restrict transmission of information to authorised parties",         "obligation_level": "mandatory",    "source_version": "2017",  "cwe_ids": ["CWE-319", "CWE-311"]},
+  {"framework": "NIST-800-53","control_id": "AC-3",  "control_name": "Access Enforcement",                                                "obligation_level": "mandatory",    "source_version": "Rev5",  "cwe_ids": ["CWE-284", "CWE-287"]},
+  {"framework": "NIST-800-53","control_id": "SI-10", "control_name": "Information Input Validation",                                      "obligation_level": "mandatory",    "source_version": "Rev5",  "cwe_ids": ["CWE-20",  "CWE-89",  "CWE-79"]}
+]

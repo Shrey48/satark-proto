@@ -1,0 +1,17 @@
+[
+  {"port": 22,    "protocol": "tcp", "service_type": "SSH",           "risk_level": "critical", "recommended_action": "Restrict to bastion/VPN CIDRs only"},
+  {"port": 3389,  "protocol": "tcp", "service_type": "RDP",           "risk_level": "critical", "recommended_action": "Restrict to bastion/VPN CIDRs only"},
+  {"port": 5432,  "protocol": "tcp", "service_type": "PostgreSQL",    "risk_level": "critical", "recommended_action": "No public access. VPC-internal only."},
+  {"port": 3306,  "protocol": "tcp", "service_type": "MySQL",         "risk_level": "critical", "recommended_action": "No public access. VPC-internal only."},
+  {"port": 27017, "protocol": "tcp", "service_type": "MongoDB",       "risk_level": "critical", "recommended_action": "No public access. VPC-internal only."},
+  {"port": 6379,  "protocol": "tcp", "service_type": "Redis",         "risk_level": "critical", "recommended_action": "No public access. Auth required."},
+  {"port": 9200,  "protocol": "tcp", "service_type": "Elasticsearch", "risk_level": "critical", "recommended_action": "No public access. Auth required."},
+  {"port": 2379,  "protocol": "tcp", "service_type": "etcd",          "risk_level": "critical", "recommended_action": "K8s control plane only."},
+  {"port": 10250, "protocol": "tcp", "service_type": "K8s kubelet",   "risk_level": "critical", "recommended_action": "No public access."},
+  {"port": 1433,  "protocol": "tcp", "service_type": "MSSQL",         "risk_level": "critical", "recommended_action": "No public access. VPC-internal only."},
+  {"port": 9092,  "protocol": "tcp", "service_type": "Kafka",         "risk_level": "high",     "recommended_action": "VPC-internal only. SASL auth required."},
+  {"port": 2181,  "protocol": "tcp", "service_type": "ZooKeeper",     "risk_level": "high",     "recommended_action": "VPC-internal only."},
+  {"port": 5601,  "protocol": "tcp", "service_type": "Kibana",        "risk_level": "high",     "recommended_action": "Auth required. Not publicly accessible."},
+  {"port": 8500,  "protocol": "tcp", "service_type": "Consul",        "risk_level": "high",     "recommended_action": "VPC-internal only. ACL required."},
+  {"port": 1521,  "protocol": "tcp", "service_type": "Oracle DB",     "risk_level": "critical", "recommended_action": "No public access. VPC-internal only."}
+]

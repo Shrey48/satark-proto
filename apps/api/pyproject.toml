@@ -1,0 +1,51 @@
+[tool.poetry]
+name = "satark-api"
+version = "0.1.0"
+description = "SATARK VARG+ Layer 1 API"
+python = "^3.12"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+fastapi = "^0.115.0"
+uvicorn = {extras = ["standard"], version = "^0.30.0"}
+pydantic = "^2.8.0"
+pydantic-settings = "^2.4.0"
+neo4j = "^5.23.0"
+psycopg2-binary = "^2.9.9"
+sqlalchemy = "^2.0.35"
+redis = "^5.0.8"
+celery = {extras = ["redis"], version = "^5.4.0"}
+anthropic = "^0.34.0"
+sentence-transformers = "^3.0.1"
+tree-sitter = "^0.22.0"
+tree-sitter-python = "^0.23.0"
+tree-sitter-javascript = "^0.23.0"
+tree-sitter-typescript = "^0.23.0"
+tree-sitter-java = "^0.23.0"
+tree-sitter-go = "^0.23.0"
+pyyaml = "^6.0.2"
+httpx = "^0.27.0"
+python-jose = {extras = ["cryptography"], version = "^3.3.0"}
+passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+python-multipart = "^0.0.9"
+confluent-kafka = "^2.5.0"
+tenacity = "^9.0.0"
+structlog = "^24.4.0"
+prometheus-client = "^0.21.0"
+
+[tool.poetry.dev-dependencies]
+pytest = "^8.3.0"
+pytest-asyncio = "^0.24.0"
+pytest-cov = "^5.0.0"
+black = "^24.8.0"
+ruff = "^0.6.0"
+mypy = "^1.11.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# Additional runtime dependencies
+asyncpg = "^0.29.0"
+aiohttp = "^3.10.0"
+structlog = "^24.4.0"

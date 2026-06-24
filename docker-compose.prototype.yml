@@ -1,0 +1,95 @@
+# SATARK Layer 1 — Local Prototype Stack
+# Start: docker compose -f docker-compose.prototype.yml up -d
+# Stop:  docker compose -f docker-compose.prototype.yml down
+
+services:
+  neo4j:
+    image: neo4j:5.23-community
+    container_name: satark_neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/satark123
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_server_memory_heap_max__size: 2G
+      NEO4J_server_memory_pagecache_size: 1G
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: satark_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: satark
+      POSTGRES_USER: satark
+      POSTGRES_PASSWORD: satark123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U satark"]
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: satark_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.prototype
+    container_name: satark_api
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=prototype
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=satark123
+      - POSTGRES_URI=postgresql+asyncpg://satark:satark123@postgres:5432/satark
+      - REDIS_URI=redis://redis:6379/0
+      - LLM_PROVIDER=deepseek
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_MODEL=deepseek-chat
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./apps/api/src:/app/src
+      - ./data/uploads:/app/uploads
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: on-failure
+
+  dashboard:
+    build:
+      context: ./apps/dashboard
+      dockerfile: Dockerfile.prototype
+    container_name: satark_dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - api
+
+volumes:
+  neo4j_data:
+  postgres_data:
