@@ -437,6 +437,8 @@ export default function App() {
                 {type:'openapi',     label:'OpenAPI Spec',        ext:'.yaml', desc:'REST API endpoints and parameters'},
                 {type:'iam',         label:'IAM Policy',          ext:'.json', desc:'AWS IAM statements with E_trust edges'},
               {type:'cicd',        label:'CI/CD Pipeline',      ext:'.yml',  desc:'GitHub Actions / GitLab CI — pipelines, jobs, steps, secret injections'},
+              {type:'container',   label:'Dockerfile / Compose',ext:'',      desc:'Container images, base images, layers, exposed ports, env vars'},
+              {type:'compliance',  label:'Compliance Declarations', ext:'.json', desc:'PCI-DSS, HIPAA, SOC2, NIST — ComplianceRule nodes, E_governs edges'},
               ].map(item=>(
                 <div key={item.type} style={{ background:'#161b22', border:'1px solid #30363d', borderRadius:8, padding:16 }}>
                   <div style={{ fontWeight:600, color:'#c9d1d9', fontSize:13, marginBottom:4 }}>{item.label}</div>

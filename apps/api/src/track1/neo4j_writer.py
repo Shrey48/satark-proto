@@ -38,6 +38,8 @@ def _extract_top_level(domain_type: str, node_type: str, props: dict) -> dict:
             out["arn"] = props["arn"]
         if "resource_arn" in props:
             out["resource_arn"] = props["resource_arn"]
+        if "role_arn" in props:
+            out["role_arn"] = props["role_arn"]
         if "resource_type" in props:
             out["terraform_resource_type"] = props["resource_type"]
         tags = props.get("tags", {})
@@ -92,12 +94,28 @@ def _extract_top_level(domain_type: str, node_type: str, props: dict) -> dict:
 
 
 async def write_fragment(fragment: GraphFragment, org_id: str = "prototype") -> dict:
+    """
+    Idempotent re-ingestion — 5-case logic (spec Section 4.7):
+      Case 1: Matched and unchanged → no write
+      Case 2: Matched but changed  → close old (valid_to=now) + create new
+      Case 3: Not in new parse     → closed by caller (not handled here per fragment)
+      Case 4: Match in stubs       → promote stub to real node
+      Case 5: No match anywhere    → create new node
+    For prototype: simplified to MERGE-based upsert (handles cases 1, 2, 5).
+    Case 4 (stub promotion) handled by checking status=unresolved_reference.
+    """
     nodes_written = 0
     edges_written = 0
 
     async with tenant_session(org_id) as session:
         for node in fragment.nodes:
             top = _extract_top_level(node.domain_type, node.node_type, node.properties)
+
+            # Case 4: Check if this entity_id exists as a stub — promote if so
+            await session.run("""
+                MATCH (stub:Node {entity_id: $entity_id, status: 'unresolved_reference'})
+                SET stub.status = null, stub.promoted_at = datetime()
+            """, entity_id=node.entity_id)
 
             await session.run("""
                 MERGE (n:Node {entity_id: $entity_id})

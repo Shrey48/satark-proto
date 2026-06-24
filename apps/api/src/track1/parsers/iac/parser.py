@@ -172,6 +172,20 @@ def parse_terraform_file(content: str, file_path: str, asset_id: str) -> GraphFr
         if resource_arn:
             props["resource_arn"] = resource_arn
 
+        # Extract execution role ARN for Lambda/EC2/ECS (used in Pass 3 E_trust)
+        role_arn = _extract_property(body, "role")
+        if not role_arn:
+            role_arn = _extract_property(body, "execution_role_arn")
+        if not role_arn:
+            role_arn = _extract_property(body, "task_role_arn")
+        if role_arn and "arn:aws" in role_arn:
+            props["role_arn"] = role_arn
+
+        # Extract VPC security group references (used in Pass 3 posture)
+        sg_refs = re.findall(r'aws_security_group\.\w+\.id', body)
+        if sg_refs:
+            props["security_group_refs"] = sg_refs
+
         # Capture bucket/function name as secondary display info
         for key in ("bucket", "function_name"):
             val = _extract_property(body, key)

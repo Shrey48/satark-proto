@@ -100,7 +100,83 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
             results["cross_asset_links"] += 1
             logger.info("api_fn_linked", path=pair["path"], fn=pair["fname"])
 
-        # ── Pass 2: K8s Service → Deployment (pod selector match) ─────────────
+        # ── Pass 3: Cloud resource → IAM execution role (ARN-exact) ───────────
+        # Lambda/EC2/ECS with role_arn → IAM Policy node
+        r = await session.run("""
+            MATCH (res:Node {domain_type: 'cloud'})
+            WHERE res.valid_to IS NULL AND res.role_arn IS NOT NULL
+            MATCH (policy:Node {node_type: 'Policy'})
+            WHERE policy.valid_to IS NULL
+            AND NOT (res)-[:EDGE {edge_type: 'E_trust'}]->(policy)
+            RETURN res.entity_id AS rid, policy.entity_id AS pid,
+                   res.name AS rname, policy.name AS pname,
+                   res.role_arn AS role_arn
+        """)
+        role_pairs = [dict(rec) async for rec in r]
+        for pair in role_pairs:
+            role_arn = (pair.get("role_arn") or "").lower().replace("-","")
+            pname    = (pair.get("pname")    or "").lower().replace("-policy","").replace("-","")
+            if pname and role_arn and pname in role_arn:
+                wr = await session.run("""
+                    MATCH (a:Node {entity_id: $rid})
+                    MATCH (b:Node {entity_id: $pid})
+                    MERGE (a)-[r:EDGE {edge_type: 'E_trust'}]->(b)
+                    SET r.resolution_method = 'deterministic_parse',
+                        r.confidence = 0.90, r.created_at = datetime()
+                """, rid=pair["rid"], pid=pair["pid"])
+                await wr.consume()
+                results["cross_asset_links"] += 1
+                logger.info("lambda_iam_linked", resource=pair["rname"], policy=pair["pname"])
+
+        # ── Pass 3: E_governs — ComplianceRule → governed assets ─────────────
+        # Spec Section 4.6 4-step decision tree
+        r = await session.run("""
+            MATCH (rule:Node {node_type: 'ComplianceRule'})
+            WHERE rule.valid_to IS NULL
+            RETURN rule.entity_id AS rule_id, rule.scope AS scope
+        """)
+        rules = [dict(rec) async for rec in r]
+
+        for rule in rules:
+            rule_id = rule["rule_id"]
+            scope   = rule.get("scope") or []
+            if isinstance(scope, str):
+                scope = [scope]
+
+            KNOWN_DOMAINS = {"cloud","k8s","code","iam","api","cicd","container","grc"}
+            domain_scope  = [s for s in scope if s in KNOWN_DOMAINS]
+
+            if domain_scope:
+                # Step 3: domain_type filter
+                r2 = await session.run("""
+                    MATCH (n:Node)
+                    WHERE n.valid_to IS NULL AND n.domain_type IN $domains
+                    AND NOT ()-[:EDGE {edge_type: 'E_governs'}]->(n)
+                    RETURN n.entity_id AS nid LIMIT 100
+                """, domains=domain_scope)
+            else:
+                # Step 4: no scope → all assets (safe over-approximation)
+                r2 = await session.run("""
+                    MATCH (n:Node)
+                    WHERE n.valid_to IS NULL
+                    AND n.domain_type IN ['cloud','k8s','code','iam','api','cicd','container']
+                    AND NOT ()-[:EDGE {edge_type: 'E_governs'}]->(n)
+                    RETURN n.entity_id AS nid LIMIT 100
+                """)
+
+            targets = [rec["nid"] async for rec in r2]
+            for target_id in targets:
+                wr = await session.run("""
+                    MATCH (rule:Node {entity_id: $rule_id})
+                    MATCH (n:Node {entity_id: $nid})
+                    MERGE (rule)-[r:EDGE {edge_type: 'E_governs'}]->(n)
+                    SET r.resolution_method = 'deterministic_parse',
+                        r.confidence = 1.0, r.created_at = datetime()
+                """, rule_id=rule_id, nid=target_id)
+                await wr.consume()
+                results["cross_asset_links"] += 1
+
+                # ── Pass 2: K8s Service → Deployment (pod selector match) ─────────────
         r = await session.run("""
             MATCH (svc:Node {node_type: 'Service'})
             MATCH (dep:Node {node_type: 'Deployment'})
