@@ -1,10 +1,14 @@
 """
 SATARK Layer 1 — Terraform IaC Parser (B1)
 
-Fix: aws_wafv2_web_acl_association removed from APPLICATION_FIREWALL_TYPES.
-It is an attachment resource, not a firewall itself. Keeping it as a plain
-Resource allows the linker's has_waf_association check to detect it by
-terraform_resource_type, without over-stamping it as a firewall.
+Fix: display_name uses tags.Name only (uppercase N = AWS tag convention).
+     tags.name (lowercase) matches nested block properties like
+     rule { name = "AWSManagedRulesSQLiRuleSet" } and must NOT be used for display_name.
+
+resource_subtype per spec Section 3.3:
+  network_firewall: aws_security_group, aws_network_acl, ...
+  application_firewall: aws_wafv2_web_acl, aws_wafv2_web_acl_association, ...
+  (aws_wafv2_web_acl_association is correctly application_firewall per spec)
 """
 import re
 from typing import Optional
@@ -14,21 +18,18 @@ import structlog
 logger = structlog.get_logger(__name__)
 ORG_ID = "prototype"
 
+# Per spec Section 3.3
 NETWORK_FIREWALL_TYPES = {
     "aws_security_group", "aws_network_acl", "aws_default_security_group",
     "google_compute_firewall", "google_compute_network_firewall_policy",
     "azurerm_network_security_group", "azurerm_network_security_rule",
 }
-
-# NOTE: aws_wafv2_web_acl_association is intentionally NOT here.
-# It is an association/attachment resource. The linker detects it separately.
 APPLICATION_FIREWALL_TYPES = {
-    "aws_wafv2_web_acl", "aws_waf_web_acl",
+    "aws_wafv2_web_acl", "aws_wafv2_web_acl_association", "aws_waf_web_acl",
     "azurerm_web_application_firewall_policy",
     "google_compute_security_policy",
     "cloudflare_waf_rule",
 }
-
 PUBLIC_RESOURCE_INDICATORS = {
     "aws_s3_bucket", "aws_api_gateway_rest_api", "aws_api_gateway_v2_api",
     "aws_lb", "aws_alb", "aws_cloudfront_distribution",
@@ -45,6 +46,7 @@ def _get_resource_subtype(resource_type: str) -> Optional[str]:
 
 
 def _parse_blocks(content: str) -> list[dict]:
+    """Extract top-level resource blocks only."""
     blocks = []
     lines  = content.split("\n")
     i = 0
@@ -52,11 +54,9 @@ def _parse_blocks(content: str) -> list[dict]:
         line = lines[i].strip()
         m = re.match(r'^resource\s+"([^"]+)"\s+"([^"]+)"\s*\{', line)
         if m:
-            res_type   = m.group(1)
-            res_name   = m.group(2)
+            res_type, res_name = m.group(1), m.group(2)
             start_line = i + 1
-            depth      = 1
-            body_lines = []
+            depth, body_lines = 1, []
             i += 1
             while i < len(lines) and depth > 0:
                 l = lines[i]
@@ -74,16 +74,48 @@ def _parse_blocks(content: str) -> list[dict]:
     return blocks
 
 
-def _extract_tags(body: str) -> dict:
+def _extract_aws_tags(body: str) -> dict:
+    """
+    Extract only AWS-style tags block key-value pairs.
+    Looks specifically for a tags { ... } block to avoid picking up
+    nested resource block properties like rule { name = "..." }.
+    """
     tags = {}
-    for m in re.finditer(r'"?(\w+)"?\s*=\s*"([^"]*)"', body):
-        tags[m.group(1)] = m.group(2)
+    # Find a tags block
+    m = re.search(r'\btags\s*=\s*\{([^}]*)\}', body, re.DOTALL)
+    if m:
+        tag_block = m.group(1)
+        for tm in re.finditer(r'"?(\w+)"?\s*=\s*"([^"]*)"', tag_block):
+            tags[tm.group(1)] = tm.group(2)
     return tags
 
 
 def _extract_property(body: str, key: str) -> Optional[str]:
-    m = re.search(rf'\b{key}\s*=\s*"?([^"\n]+)"?', body)
-    return m.group(1).strip().strip('"') if m else None
+    """Extract a top-level property value (not inside nested blocks)."""
+    # Use word boundary to avoid partial matches (cidr_block vs cidr_blocks)
+    m = re.search(rf'\b{re.escape(key)}\b\s*=\s*"([^"]+)"', body)
+    return m.group(1).strip() if m else None
+
+
+def _extract_cidr(body: str) -> Optional[str]:
+    """
+    Extract CIDR from security group rules.
+    Checks both cidr_block = "x.x.x.x/x" and cidr_blocks = ["x.x.x.x/x"].
+    Returns the most permissive CIDR found.
+    """
+    # cidr_blocks = ["0.0.0.0/0"] or cidr_blocks = ["..."]
+    for m in re.finditer(r'cidr_blocks\s*=\s*\[([^\]]*)\]', body):
+        cidrs_str = m.group(1)
+        if "0.0.0.0/0" in cidrs_str or "::/0" in cidrs_str:
+            return "0.0.0.0/0"
+        # Return first CIDR found
+        first = re.search(r'"([^"]+)"', cidrs_str)
+        if first:
+            return first.group(1)
+
+    # cidr_block = "x.x.x.x/x"
+    m = re.search(r'\bcidr_block\b\s*=\s*"([^"]+)"', body)
+    return m.group(1) if m else None
 
 
 def _make_entity_id(res_type: str, res_name: str) -> str:
@@ -110,22 +142,22 @@ def parse_terraform_file(content: str, file_path: str, asset_id: str) -> GraphFr
         body      = block["body"]
         entity_id = _make_entity_id(res_type, res_name)
 
-        tags             = _extract_tags(body)
+        # Extract AWS tags block only — avoids nested block property bleed
+        tags = _extract_aws_tags(body)
+
         resource_subtype = _get_resource_subtype(res_type)
         is_entry         = res_type in PUBLIC_RESOURCE_INDICATORS
 
-        display_name = tags.get("Name") or tags.get("name") or res_name
+        # display_name: AWS tag "Name" (uppercase N) → resource label
+        # Do NOT use tags.get("name") — it matches nested block properties
+        display_name = tags.get("Name") or res_name
+
         summary = f"{res_type} named '{display_name}'"
         if resource_subtype:
             summary += f" ({resource_subtype})"
 
-        # Extract cidr_block for firewall posture computation
-        cidr = _extract_property(body, "cidr_block")
-        # Also check cidr_blocks array (security group ingress/egress rules)
-        if not cidr:
-            m = re.search(r'cidr_blocks\s*=\s*\["([^"]+)"', body)
-            if m:
-                cidr = m.group(1)
+        # CIDR extraction for firewall posture Sub-step F
+        cidr = _extract_cidr(body)
 
         props = {
             "resource_type": res_type,
@@ -134,7 +166,14 @@ def parse_terraform_file(content: str, file_path: str, asset_id: str) -> GraphFr
         }
         if cidr:
             props["cidr_block"] = cidr
-        for key in ("bucket", "function_name", "name"):
+
+        # Extract resource_arn for WAF association (used in Pass 3 E_routes_to)
+        resource_arn = _extract_property(body, "resource_arn")
+        if resource_arn:
+            props["resource_arn"] = resource_arn
+
+        # Capture bucket/function name as secondary display info
+        for key in ("bucket", "function_name"):
             val = _extract_property(body, key)
             if val and not val.startswith("var.") and not val.startswith("local."):
                 props[key] = val

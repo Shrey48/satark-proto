@@ -35,7 +35,7 @@ const POSTURE_INFO: Record<string, { color: string; label: string }> = {
 const DOMAINS = ['cloud','code','k8s','iam','api','container','mobile','ai_llm']
 
 export default function App() {
-  const [view, setView]                 = useState<'graph'|'upload'|'findings'|'stats'>('graph')
+  const [view, setView]                 = useState<'graph'|'upload'|'findings'|'review'|'stats'>('graph')
   const [stats, setStats]               = useState<any>(null)
   const [nodes, setNodes]               = useState<any[]>([])
   const [edges, setEdges]               = useState<any[]>([])
@@ -46,21 +46,27 @@ export default function App() {
   const [findings, setFindings]         = useState<any[]>([])
   const [findingStats, setFindingStats] = useState<any>(null)
   const [singleFinding, setSingleFinding] = useState('')
+  const [reviewItems, setReviewItems]     = useState<any[]>([])
+  const [reviewStats, setReviewStats]     = useState<any>(null)
+  const [reviewDeciding, setReviewDeciding] = useState<string | null>(null)
   const [activeDomains, setActiveDomains] = useState<Set<string>>(new Set(DOMAINS))
   const cyRef      = useRef<HTMLDivElement>(null)
   const cyInstance = useRef<any>(null)
 
   const fetchAll = async () => {
     try {
-      const [sr, nr, er, fr, fsr] = await Promise.all([
+      const [sr, nr, er, fr, fsr, rq, rs] = await Promise.all([
         fetch(`${API}/api/v1/graph/stats`).then(r => r.json()),
         fetch(`${API}/api/v1/graph/nodes?limit=500`).then(r => r.json()),
         fetch(`${API}/api/v1/graph/edges?limit=1000`).then(r => r.json()),
         fetch(`${API}/api/v1/findings/?limit=100`).then(r => r.json()),
         fetch(`${API}/api/v1/findings/stats`).then(r => r.json()),
+        fetch(`${API}/api/v1/review/queue`).then(r => r.json()),
+        fetch(`${API}/api/v1/review/stats`).then(r => r.json()),
       ])
       setStats(sr); setNodes(nr.nodes||[]); setEdges(er.edges||[])
       setFindings(fr.findings||[]); setFindingStats(fsr)
+      setReviewItems(rq.items||[]); setReviewStats(rs)
     } catch(e) { console.error(e) }
   }
 
@@ -299,7 +305,8 @@ export default function App() {
         )}
 
         <nav style={{ padding:'8px', flex:1, overflowY:'auto' }}>
-          {[{id:'graph',label:'⬡ Knowledge Graph'},{id:'upload',label:'↑ Ingest Asset'},{id:'findings',label:'⚠ Findings Pool'},{id:'stats',label:'≡ Stats'}].map(item=>(
+          {[{id:'graph',label:'⬡ Knowledge Graph'},{id:'upload',label:'↑ Ingest Asset'},{id:'findings',label:'⚠ Findings Pool'},
+            {id:'review',label:'🔗 Link Review'},{id:'stats',label:'≡ Stats'}].map(item=>(
             <div key={item.id} onClick={()=>setView(item.id as any)} style={{ padding:'8px 10px', borderRadius:6, cursor:'pointer', marginBottom:2, background:view===item.id?'#1f6feb22':'transparent', color:view===item.id?'#58a6ff':'#c9d1d9', fontSize:13 }}>
               {item.label}
             </div>
@@ -429,6 +436,7 @@ export default function App() {
                 {type:'code/python', label:'Python Code',         ext:'.py',   desc:'Functions, classes, route handlers'},
                 {type:'openapi',     label:'OpenAPI Spec',        ext:'.yaml', desc:'REST API endpoints and parameters'},
                 {type:'iam',         label:'IAM Policy',          ext:'.json', desc:'AWS IAM statements with E_trust edges'},
+              {type:'cicd',        label:'CI/CD Pipeline',      ext:'.yml',  desc:'GitHub Actions / GitLab CI — pipelines, jobs, steps, secret injections'},
               ].map(item=>(
                 <div key={item.type} style={{ background:'#161b22', border:'1px solid #30363d', borderRadius:8, padding:16 }}>
                   <div style={{ fontWeight:600, color:'#c9d1d9', fontSize:13, marginBottom:4 }}>{item.label}</div>
@@ -524,6 +532,130 @@ export default function App() {
                   </div>
                 ))
             }
+          </div>
+        )}
+
+
+        {/* Graph Link Review Interface — spec Section 4.4b */}
+        {view==='review' && (
+          <div style={{ flex:1, padding:32, overflowY:'auto' }}>
+            <div style={{ fontSize:18, fontWeight:700, color:'#f0f6fc', marginBottom:4 }}>Graph Link Review Interface</div>
+            <div style={{ fontSize:13, color:'#8b949e', marginBottom:20 }}>
+              Edges created by fuzzy or LLM matching that need human confirmation.
+              Each decision is permanent and written to the Component 8 registry.
+            </div>
+
+            {/* Stats row */}
+            {reviewStats && (
+              <div style={{ display:'flex', gap:12, marginBottom:24 }}>
+                {[
+                  {label:'Pending Review', value:reviewStats.pending||0, color:'#d29922'},
+                  {label:'Confirmed',      value:reviewStats.confirmed||0, color:'#3fb950'},
+                  {label:'Gaps Flagged',   value:reviewStats.gaps||0,    color:'#8b949e'},
+                ].map(item=>(
+                  <div key={item.label} style={{background:'#161b22', border:'1px solid #30363d', borderRadius:8, padding:'14px 20px'}}>
+                    <div style={{fontSize:22, fontWeight:700, color:item.color}}>{item.value}</div>
+                    <div style={{fontSize:11, color:'#8b949e'}}>{item.label}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {reviewItems.length === 0 ? (
+              <div style={{color:'#3fb950', fontSize:14, padding:20, background:'#0d2818', borderRadius:8, border:'1px solid #1a4731'}}>
+                ✓ No links pending review. All edges are deterministic or human-confirmed.
+              </div>
+            ) : (
+              <div style={{maxWidth:900}}>
+                {reviewItems.map((item, i) => (
+                  <div key={item.edge_id} style={{
+                    background:'#161b22', border:'1px solid #30363d', borderRadius:8,
+                    padding:20, marginBottom:16,
+                    opacity: reviewDeciding === item.edge_id ? 0.5 : 1
+                  }}>
+                    {/* Header */}
+                    <div style={{display:'flex', justifyContent:'space-between', marginBottom:14}}>
+                      <div style={{display:'flex', alignItems:'center', gap:10}}>
+                        <span style={{fontSize:11, padding:'2px 8px', background:'#d2992222', color:'#d29922', borderRadius:4, fontWeight:600}}>
+                          {item.method}
+                        </span>
+                        <span style={{fontSize:11, color:'#8b949e'}}>
+                          confidence: {((item.confidence||0)*100).toFixed(0)}%
+                        </span>
+                        <span style={{fontSize:11, padding:'2px 8px', background:'#388bfd22', color:'#388bfd', borderRadius:4}}>
+                          {item.edge_type}
+                        </span>
+                      </div>
+                      <span style={{fontSize:11, color:'#8b949e'}}>{i+1} of {reviewItems.length}</span>
+                    </div>
+
+                    {/* Two nodes side by side */}
+                    <div style={{display:'grid', gridTemplateColumns:'1fr auto 1fr', gap:12, alignItems:'center', marginBottom:16}}>
+                      {/* From node */}
+                      <div style={{background:'#0d1117', borderRadius:6, padding:12, border:'1px solid #21262d'}}>
+                        <div style={{fontSize:11, color:'#8b949e', marginBottom:4}}>FROM</div>
+                        <div style={{fontWeight:700, color:'#f0f6fc', fontSize:14, marginBottom:4}}>{item.from.name}</div>
+                        <div style={{fontSize:11, color:'#8b949e', marginBottom:2}}>
+                          {item.from.domain} · {item.from.type}
+                        </div>
+                        {item.from.file && <div style={{fontSize:10, color:'#555', wordBreak:'break-all'}}>{item.from.file}</div>}
+                        {item.from.summary && (
+                          <div style={{marginTop:6, fontSize:11, color:'#8b949e', lineHeight:1.4}}>{item.from.summary}</div>
+                        )}
+                      </div>
+
+                      {/* Arrow */}
+                      <div style={{textAlign:'center', color:'#388bfd', fontSize:18}}>→</div>
+
+                      {/* To node */}
+                      <div style={{background:'#0d1117', borderRadius:6, padding:12, border:'1px solid #21262d'}}>
+                        <div style={{fontSize:11, color:'#8b949e', marginBottom:4}}>TO</div>
+                        <div style={{fontWeight:700, color:'#f0f6fc', fontSize:14, marginBottom:4}}>{item.to.name}</div>
+                        <div style={{fontSize:11, color:'#8b949e', marginBottom:2}}>
+                          {item.to.domain} · {item.to.type}
+                        </div>
+                        {item.to.file && <div style={{fontSize:10, color:'#555', wordBreak:'break-all'}}>{item.to.file}</div>}
+                        {item.to.summary && (
+                          <div style={{marginTop:6, fontSize:11, color:'#8b949e', lineHeight:1.4}}>{item.to.summary}</div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Decision buttons */}
+                    <div style={{display:'flex', gap:10}}>
+                      {[
+                        {decision:'confirmed', label:'✓ Same service', color:'#238636', bg:'#0d2818', border:'#1a4731'},
+                        {decision:'rejected',  label:'✗ Not the same', color:'#f85149', bg:'#2d1117', border:'#6e2020'},
+                        {decision:'unsure',    label:'? Not sure — flag gap', color:'#8b949e', bg:'#161b22', border:'#30363d'},
+                      ].map(btn => (
+                        <button key={btn.decision}
+                          disabled={reviewDeciding !== null}
+                          onClick={async () => {
+                            setReviewDeciding(item.edge_id)
+                            try {
+                              await fetch(`${API}/api/v1/review/decide`, {
+                                method: 'POST',
+                                headers: {'Content-Type':'application/json'},
+                                body: JSON.stringify({edge_id: item.edge_id, decision: btn.decision})
+                              })
+                              await fetchAll()
+                            } finally { setReviewDeciding(null) }
+                          }}
+                          style={{
+                            padding:'8px 16px', border:`1px solid ${btn.border}`,
+                            borderRadius:6, background:btn.bg, color:btn.color,
+                            cursor: reviewDeciding ? 'not-allowed' : 'pointer',
+                            fontSize:13, fontWeight:600,
+                            opacity: reviewDeciding ? 0.5 : 1,
+                          }}>
+                          {btn.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

@@ -100,6 +100,56 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
             results["cross_asset_links"] += 1
             logger.info("api_fn_linked", path=pair["path"], fn=pair["fname"])
 
+        # ── Pass 2: K8s Service → Deployment (pod selector match) ─────────────
+        r = await session.run("""
+            MATCH (svc:Node {node_type: 'Service'})
+            MATCH (dep:Node {node_type: 'Deployment'})
+            WHERE svc.valid_to IS NULL AND dep.valid_to IS NULL
+            AND svc.k8s_namespace = dep.k8s_namespace
+            AND svc.k8s_selector_app IS NOT NULL
+            AND dep.k8s_app_label IS NOT NULL
+            AND svc.k8s_selector_app = dep.k8s_app_label
+            AND NOT (svc)-[:EDGE {edge_type: 'E_invoke'}]->(dep)
+            RETURN svc.entity_id AS sid, dep.entity_id AS did,
+                   svc.name AS sname, dep.name AS dname
+        """)
+        svc_dep_pairs = [dict(rec) async for rec in r]
+        for pair in svc_dep_pairs:
+            wr = await session.run("""
+                MATCH (a:Node {entity_id: $from_id})
+                MATCH (b:Node {entity_id: $to_id})
+                MERGE (a)-[r:EDGE {edge_type: 'E_invoke'}]->(b)
+                SET r.resolution_method = 'deterministic_parse',
+                    r.confidence = 1.0, r.created_at = datetime()
+            """, from_id=pair["sid"], to_id=pair["did"])
+            await wr.consume()
+            results["cross_asset_links"] += 1
+            logger.info("svc_dep_linked", svc=pair["sname"], dep=pair["dname"])
+
+        # ── Pass 3: E_routes_to — WAF association → protected resource ─────────
+        r = await session.run("""
+            MATCH (assoc:Node {terraform_resource_type: 'aws_wafv2_web_acl_association'})
+            WHERE assoc.valid_to IS NULL AND assoc.resource_arn IS NOT NULL
+            MATCH (waf:Node {resource_subtype: 'application_firewall'})
+            WHERE waf.valid_to IS NULL AND waf.terraform_resource_type = 'aws_wafv2_web_acl'
+            MATCH (target:Node)
+            WHERE target.valid_to IS NULL AND target.arn = assoc.resource_arn
+            RETURN waf.entity_id AS waf_id, target.entity_id AS target_id,
+                   waf.name AS wname, target.name AS tname
+        """)
+        routes_pairs = [dict(rec) async for rec in r]
+        for pair in routes_pairs:
+            wr = await session.run("""
+                MATCH (a:Node {entity_id: $waf_id})
+                MATCH (b:Node {entity_id: $target_id})
+                MERGE (a)-[r:EDGE {edge_type: 'E_routes_to'}]->(b)
+                SET r.resolution_method = 'deterministic_parse',
+                    r.confidence = 1.0, r.created_at = datetime()
+            """, waf_id=pair["waf_id"], target_id=pair["target_id"])
+            await wr.consume()
+            results["cross_asset_links"] += 1
+            logger.info("waf_routes_to_linked", waf=pair["wname"], target=pair["tname"])
+
         # ── Sub-step F: Per-node firewall posture ─────────────────────────────
         r = await session.run("""
             MATCH (n:Node)
@@ -188,25 +238,26 @@ async def _posture_for_node(session, node: dict) -> str:
     has_net_fw = any(fw["subtype"] == "network_firewall"     for fw in firewalls)
     has_waf    = any(fw["subtype"] == "application_firewall" for fw in firewalls)
 
-    # Only add _with_waf if there is an explicit WAF association resource
-    # (aws_wafv2_web_acl_association) in the same workspace
-    has_waf_assoc = False
-    if has_waf:
-        ar = await session.run("""
-            MATCH (ws:Node)-[:EDGE]->(n:Node {entity_id: $nid})
-            WITH ws
-            MATCH (ws)-[:EDGE]->(assoc:Node)
-            WHERE assoc.terraform_resource_type IS NOT NULL
-            AND assoc.terraform_resource_type CONTAINS 'association'
-            RETURN count(assoc) AS cnt
-        """, nid=nid)
-        ar_rec = await ar.single()
-        has_waf_assoc = bool(ar_rec and ar_rec["cnt"] > 0)
+    # WAF only protects load balancers and API gateways directly.
+    # Lambda functions and S3 buckets are NOT protected by WAF via association.
+    # Check the resource type to prevent over-inheritance.
+    WAF_PROTECTED_TYPES = {
+        "aws_lb", "aws_alb", "aws_cloudfront_distribution",
+        "aws_api_gateway_rest_api", "aws_api_gateway_v2_api",
+        "azurerm_application_gateway", "google_compute_backend_service",
+    }
+    resource_type_r = await session.run(
+        "MATCH (n:Node {entity_id: $nid}) RETURN n.terraform_resource_type AS rt",
+        nid=nid
+    )
+    rt_rec = await resource_type_r.single()
+    resource_type = rt_rec["rt"] if rt_rec else None
+    is_waf_protected_type = resource_type in WAF_PROTECTED_TYPES
 
-    if has_net_fw and has_waf and has_waf_assoc:
+    if has_net_fw and has_waf and is_waf_protected_type:
         return "declared_restrictive_with_waf"
     if has_net_fw:
         return "declared_restrictive"
-    if has_waf:
+    if has_waf and is_waf_protected_type:
         return "declared_restrictive_with_waf"
     return "unknown"

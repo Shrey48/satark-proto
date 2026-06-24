@@ -6,6 +6,7 @@ from track1.parsers.k8s.parser import parse_k8s_file
 from track1.parsers.code.parser import parse_python_file
 from track1.parsers.openapi.parser import parse_openapi_file
 from track1.parsers.iam.parser import parse_iam_file
+from track1.parsers.cicd.parser import parse_cicd_file
 from track1.neo4j_writer import write_fragment
 import structlog
 
@@ -65,4 +66,14 @@ async def ingest_iam(file: UploadFile = File(...)):
     content = (await file.read()).decode("utf-8")
     asset_id = f"iam-{file.filename.replace('.json','')}-{str(uuid.uuid4())[:8]}"
     fragment = parse_iam_file(content=content, file_path=file.filename, asset_id=asset_id)
+    return _resp(asset_id, file.filename, fragment, await write_fragment(fragment))
+
+
+@router.post("/cicd")
+async def ingest_cicd(file: UploadFile = File(...)):
+    if not any(file.filename.endswith(e) for e in (".yml", ".yaml")):
+        raise HTTPException(400, "Only .yml/.yaml files")
+    content = (await file.read()).decode("utf-8")
+    asset_id = f"cicd-{file.filename.split('.')[0]}-{str(uuid.uuid4())[:8]}"
+    fragment = parse_cicd_file(content=content, file_path=file.filename, asset_id=asset_id)
     return _resp(asset_id, file.filename, fragment, await write_fragment(fragment))

@@ -51,10 +51,14 @@ def parse_python_file(content: str, file_path: str, asset_id: str) -> GraphFragm
 
         # Fix: use set_language(), not Parser(lang) constructor
         # Parser(lang) is tree-sitter >= 0.23 only
-        lang = tspython.language()
-        PY_LANGUAGE = Language(lang)
-        parser = Parser()
-        parser.set_language(PY_LANGUAGE)
+        PY_LANGUAGE = Language(tspython.language())
+        # tree-sitter 0.23+: Parser accepts Language in constructor
+        # tree-sitter 0.22: use parser.set_language()
+        try:
+            parser = Parser(PY_LANGUAGE)
+        except TypeError:
+            parser = Parser()
+            parser.set_language(PY_LANGUAGE)
 
         tree = parser.parse(bytes(content, "utf8"))
         return _parse_with_treesitter(tree, content, file_path, asset_id, fragment)

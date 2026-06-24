@@ -36,6 +36,8 @@ def _extract_top_level(domain_type: str, node_type: str, props: dict) -> dict:
     if domain_type == "cloud":
         if "arn" in props:
             out["arn"] = props["arn"]
+        if "resource_arn" in props:
+            out["resource_arn"] = props["resource_arn"]
         if "resource_type" in props:
             out["terraform_resource_type"] = props["resource_type"]
         tags = props.get("tags", {})
@@ -64,6 +66,10 @@ def _extract_top_level(domain_type: str, node_type: str, props: dict) -> dict:
         ports = props.get("ports", [])
         if ports:
             out["ports"] = [p for p in ports if p]
+        # Service selector — used for Service→Deployment E_invoke in linker
+        selector = props.get("selector", {})
+        if isinstance(selector, dict) and selector:
+            out["k8s_selector_app"] = selector.get("app") or selector.get("app.kubernetes.io/name")
 
     # Code
     if domain_type == "code":

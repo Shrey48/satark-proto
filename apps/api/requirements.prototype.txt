@@ -18,8 +18,8 @@ anthropic==0.34.0
 openai==1.45.0
 
 # Code parsing (tree-sitter only — no Joern for prototype)
-tree-sitter==0.22.0
-tree-sitter-python==0.23.0
+tree-sitter==0.23.2
+tree-sitter-python==0.23.4
 tree-sitter-javascript==0.23.0
 tree-sitter-typescript==0.23.0
 tree-sitter-java==0.23.0
