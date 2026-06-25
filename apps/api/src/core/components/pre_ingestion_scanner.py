@@ -56,22 +56,24 @@ async def scan_and_seed_aliases(
         return []
 
     # Write each extracted name as an alias for this asset_id
-    for name in names:
-        if name and len(name) > 2:
-            await write_alias(
-                org_id=org_id,
-                informal_name=name.lower().replace("-", "_"),
-                canonical_entity_id=asset_id,
-                context=_get_file_domain(file_path),
-            )
-            # Also write with hyphen variant
-            if "_" in name:
-                await write_alias(
-                    org_id=org_id,
-                    informal_name=name.lower().replace("_", "-"),
-                    canonical_entity_id=asset_id,
-                    context=_get_file_domain(file_path),
-                )
+        for name in names:
+                if name and len(name) > 2:
+                    await write_alias(
+                        org_id=org_id,
+                        informal_name=name.lower().replace("-", "_"),
+                        canonical_entity_id=asset_id,
+                        context=_get_file_domain(file_path),
+                        source="pre_ingestion_scan",
+                    )
+                    # Also write with hyphen variant
+                    if "_" in name:
+                        await write_alias(
+                            org_id=org_id,
+                            informal_name=name.lower().replace("_", "-"),
+                            canonical_entity_id=asset_id,
+                            context=_get_file_domain(file_path),
+                            source="pre_ingestion_scan",
+                        )
 
     if names:
         logger.info("pre_ingestion_aliases_seeded",

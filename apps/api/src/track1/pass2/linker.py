@@ -176,6 +176,58 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
                 await wr.consume()
                 results["cross_asset_links"] += 1
 
+                # ── E_data_flow: Taint propagation along E_invoke chains ─────────────
+        # Spec Section 5: E_data_flow = data statically traced to move from A into B.
+        # Without Joern PDG, we approximate: if function A has taint_class=external_untrusted
+        # AND A has an E_invoke edge to B, data from A likely flows into B.
+        # Marked gkg_assisted, confidence 0.85 (not deterministic_parse).
+        # Stops propagating at functions marked as sanitizers (future E_sanitize).
+        #
+        # Step 1: seed — entry point functions with external_untrusted taint
+        r = await session.run("""
+            MATCH (src:Node {node_type: 'Function', taint_class: 'external_untrusted'})
+            WHERE src.valid_to IS NULL
+            RETURN src.entity_id AS src_id, src.name AS src_name
+        """)
+        taint_sources = [dict(rec) async for rec in r]
+
+        for source in taint_sources:
+            # Step 2: walk E_invoke edges outward, create E_data_flow on each hop
+            # Limit to 3 hops to avoid unbounded propagation
+            r2 = await session.run("""
+                MATCH (src:Node {entity_id: $src_id})
+                MATCH path = (src)-[:EDGE*1..3 {edge_type: 'E_invoke'}]->(downstream:Node)
+                WHERE downstream.valid_to IS NULL
+                AND downstream.node_type IN ['Function', 'Method']
+                AND NOT (src)-[:EDGE {edge_type: 'E_data_flow'}]->(downstream)
+                RETURN DISTINCT downstream.entity_id AS target_id,
+                       length(path) AS hops
+            """, src_id=source["src_id"])
+            targets = [dict(rec) async for rec in r2]
+
+            for target in targets:
+                # Confidence degrades with each hop: 1 hop=0.85, 2=0.75, 3=0.65
+                hop_confidence = max(0.65, 0.85 - (target["hops"] - 1) * 0.10)
+                wr = await session.run("""
+                    MATCH (a:Node {entity_id: $from_id})
+                    MATCH (b:Node {entity_id: $to_id})
+                    MERGE (a)-[r:EDGE {edge_type: 'E_data_flow'}]->(b)
+                    SET r.resolution_method = 'gkg_assisted',
+                        r.confidence = $conf,
+                        r.gkg_assisted = true,
+                        r.hop_count = $hops,
+                        r.source_taint_class = 'external_untrusted',
+                        r.created_at = datetime()
+                """, from_id=source["src_id"], to_id=target["target_id"],
+                     conf=hop_confidence, hops=target["hops"])
+                await wr.consume()
+                results["cross_asset_links"] += 1
+
+            if taint_sources:
+                logger.info("e_data_flow_propagated",
+                            source=source["src_name"],
+                            downstream_count=len(targets))
+
                 # ── Pass 2: K8s Service → Deployment (pod selector match) ─────────────
         r = await session.run("""
             MATCH (svc:Node {node_type: 'Service'})

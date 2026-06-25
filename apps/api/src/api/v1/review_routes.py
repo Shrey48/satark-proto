@@ -113,6 +113,7 @@ async def submit_decision(decision: ReviewDecision):
                     informal_name=rec["aname"],
                     canonical_entity_id=to_id,
                     context=edge_type,
+                    source="human_confirmed",
                 )
                 logger.info("review_confirmed", from_name=rec["aname"],
                             to_name=rec["bname"], edge=edge_type)
@@ -139,6 +140,8 @@ async def submit_decision(decision: ReviewDecision):
                     org_id="prototype",
                     name_a=rec["aname"],
                     name_b=rec["bname"],
+                    context=edge_type,
+                    confirmed_by="reviewer",
                 )
                 logger.info("review_rejected", from_name=rec["aname"],
                             to_name=rec["bname"], edge=edge_type)
