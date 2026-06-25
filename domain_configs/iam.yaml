@@ -1,0 +1,116 @@
+# SATARK Layer 1 — Domain Configuration: IAM Policy (B3)
+# --------------------------------------------------------
+domain: iam
+file_extensions: [".json"]
+# Note: parser gates on presence of "Statement" array (IAM policy structure)
+
+# ── 1. Node Types Produced ───────────────────────────────────────────────────
+node_types:
+
+  - type: Policy
+    from_field: root        # Top-level policy document
+    extract_properties:
+      - Version
+      - Id
+
+  - type: Role
+    from_field: AssumeRolePolicyDocument
+    # Roles are inferred from the assume-role trust policy
+    extract_properties:
+      - Version
+
+  - type: Principal
+    from_field: Statement[*].Principal
+    # Flatten Principal — can be "*", {"Service": "..."}, {"AWS": "..."}
+    extract_properties:
+      - principal_type    # "AWS" | "Service" | "Federated" | "wildcard"
+      - principal_value   # the ARN or service name
+
+  - type: Statement
+    from_field: Statement[*]
+    extract_properties:
+      - Effect            # "Allow" or "Deny"
+      - Action            # list (normalized from string or list)
+      - Resource          # list (normalized)
+      - Condition         # dict if present
+
+# ── 2. Edge Types (within IAM document) ─────────────────────────────────────
+# CRITICAL FIX: ALL edges between IAM nodes are E_trust, NEVER generic "EDGE"
+# Effect=Deny still creates E_trust (with effect: deny property).
+# E_trust means "a permission relationship exists".
+
+edge_rules:
+
+  - name: policy_contains_statement
+    from_type: Policy
+    to_type: Statement
+    edge_type: E_contain
+    always: true
+
+  - name: statement_grants_to_principal
+    from_type: Statement
+    to_type: Principal
+    edge_type: E_trust
+    # Properties to copy onto the edge from the Statement
+    edge_properties:
+      - effect      # "Allow" or "Deny"
+      - actions     # normalized action list
+      - resources   # normalized resource list
+
+  - name: statement_targets_resource
+    from_type: Statement
+    to_type: Resource   # stub node if ARN not yet in graph
+    edge_type: E_trust
+    resolution_method: identifier_keyed_arn
+    edge_properties:
+      - effect
+      - actions
+
+# ── 3. Wildcard Handling ─────────────────────────────────────────────────────
+wildcard_handling:
+  # "*" as Resource → create WildcardScope stub
+  - pattern: "*"
+    action: create_stub
+    stub_type: WildcardScope
+    note: "Wildcard resource scope — potential privilege escalation risk"
+
+  # "arn:aws:*" patterns → create stub per pattern
+  - pattern: "arn:aws:*"
+    action: create_stub
+    stub_type: WildcardScope
+
+  # Specific ARNs → identifier-keyed lookup against existing nodes
+  - pattern: "arn:aws:iam::*:role/*"
+    action: identifier_keyed_lookup
+    resolve_to: Role
+
+# ── 4. Dangerous Action Patterns (for semantic_summary enrichment) ────────────
+dangerous_actions:
+  - pattern: "sts:AssumeRole"
+    risk: privilege_escalation
+    note: "Can assume roles — start of privilege escalation chain"
+  - pattern: "iam:PassRole"
+    risk: privilege_escalation
+    note: "Can pass roles to services — privilege escalation"
+  - pattern: "iam:CreateRole"
+    risk: privilege_escalation
+  - pattern: "iam:AttachRolePolicy"
+    risk: privilege_escalation
+  - pattern: "s3:*"
+    risk: data_exfiltration
+    note: "Full S3 access — potential data exfiltration"
+  - pattern: "s3:GetObject"
+    risk: data_exfiltration
+  - pattern: "kms:Decrypt"
+    risk: credential_access
+  - pattern: "secretsmanager:GetSecretValue"
+    risk: credential_access
+  - pattern: "ssm:GetParameter"
+    risk: credential_access
+  - pattern: "lambda:InvokeFunction"
+    risk: lateral_movement
+  - pattern: "ec2:*"
+    risk: resource_abuse
+  - pattern: "*"
+    risk: full_access
+    note: "Wildcard action — unrestricted permission"

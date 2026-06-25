@@ -56,4 +56,8 @@ class GraphFragment(BaseModel):
     domain_type: str
     nodes: list[KGNode] = []
     edges: list[KGEdge] = []
-    entry_points: list[str] = []                 # entity_ids of entry point nodes
+    entry_points: list[str] = []
+    deferred_relations: list[dict] = []
+    deferred_relations: list[dict] = []
+    deferred_relations: list[dict] = []
+    deferred_relations: list[dict] = []                 # entity_ids of entry point nodes

@@ -1,0 +1,173 @@
+# SATARK Layer 1 — Domain Configuration: Python Code (A1)
+# ---------------------------------------------------------
+domain: code
+file_extensions: [".py"]
+
+# ── 1. Entry Point Detection ──────────────────────────────────────────────────
+entry_point_patterns:
+
+  # HTTP route decorators
+  - type: decorator
+    patterns:
+      - "app.route"
+      - "router.get"
+      - "router.post"
+      - "router.put"
+      - "router.delete"
+      - "router.patch"
+      - "app.get"
+      - "app.post"
+      - "app.put"
+      - "app.delete"
+      - "blueprint.route"
+      - "api.route"
+      - "bp.route"
+      - "ns.route"
+      - "fastapi.get"
+      - "fastapi.post"
+    attributes_to_extract:
+      - path_arg        # First positional arg = route path
+      - methods_kwarg   # methods= keyword arg
+
+  # Lambda handlers
+  - type: function_name
+    patterns: [handler, lambda_handler, main, entrypoint, handle_event]
+
+  # Celery task decorators
+  - type: decorator
+    patterns:
+      - "app.task"
+      - "celery.task"
+      - "shared_task"
+    attributes_to_extract:
+      - name_kwarg      # name= keyword gives the task queue name
+
+  # SQS / SNS / Kafka consumer
+  - type: decorator
+    patterns:
+      - "sqs_consumer"
+      - "kafka_consumer"
+      - "event_handler"
+      - "on_event"
+
+# ── 2. AST Call Graph (E_invoke) ─────────────────────────────────────────────
+call_graph:
+  # Direct bare function calls: fn() — identifier callee
+  - ast_node: Call
+    callee_type: identifier
+    edge_type: E_invoke
+    resolution_method: deterministic_parse
+    confidence: 1.0
+    scope: same_file     # Pass 1 scope: current file only
+
+  # Dynamic dispatch: handler(request) — cannot determine target statically
+  # Hard cap: 8 candidates max (spec Section 3.4)
+  - ast_node: Call
+    callee_type: identifier
+    dynamic_dispatch_detection: true
+    max_candidates: 8
+
+  # Method calls: self.fn() — tracked but NOT E_invoke in Pass 1
+  # Cross-file method resolution attempted in Pass 2
+  - ast_node: Call
+    callee_type: attribute
+    edge_type: null      # No E_invoke in Pass 1 — defer to Pass 2
+    note: "self.fn() calls recorded as dynamic_dispatch_gap candidates"
+
+# ── 3. Taint Sources ─────────────────────────────────────────────────────────
+# Patterns that indicate external_untrusted data entering the system.
+taint_sources:
+
+  # Flask / Django / FastAPI HTTP request patterns
+  - pattern: "request.get_json()"
+    taint_class: external_untrusted
+    framework: flask
+  - pattern: "request.args"
+    taint_class: external_untrusted
+    framework: flask
+  - pattern: "request.form"
+    taint_class: external_untrusted
+    framework: flask
+  - pattern: "request.json"
+    taint_class: external_untrusted
+    framework: flask
+  - pattern: "request.body"
+    taint_class: external_untrusted
+    framework: django
+  - pattern: "request.data"
+    taint_class: external_untrusted
+    framework: django
+  - pattern: "request.POST"
+    taint_class: external_untrusted
+    framework: django
+  - pattern: "request.GET"
+    taint_class: external_untrusted
+    framework: django
+
+  # AWS Lambda event
+  - pattern: "event["
+    taint_class: external_untrusted
+    framework: lambda
+  - pattern: "event.get("
+    taint_class: external_untrusted
+    framework: lambda
+
+  # CLI args
+  - pattern: "sys.argv"
+    taint_class: external_untrusted
+  - pattern: "argparse"
+    taint_class: external_untrusted
+
+  # Environment variables (config, not untrusted)
+  - pattern: "os.environ"
+    taint_class: config
+  - pattern: "os.getenv"
+    taint_class: config
+
+# ── 4. Dangerous Sink Patterns ───────────────────────────────────────────────
+# Used for taint sink detection in PDG analysis.
+# Not used in Pass 1 — recorded for Pass 2/3 PDG slice.
+dangerous_sinks:
+  - pattern: "os.system("
+    sink_type: command_injection
+  - pattern: "subprocess.run("
+    sink_type: command_injection
+  - pattern: "subprocess.Popen("
+    sink_type: command_injection
+  - pattern: "eval("
+    sink_type: code_injection
+  - pattern: "exec("
+    sink_type: code_injection
+  - pattern: "cursor.execute("
+    sink_type: sql_injection
+  - pattern: "execute("
+    sink_type: sql_injection
+  - pattern: "open("
+    sink_type: path_traversal
+  - pattern: "pickle.loads("
+    sink_type: deserialization
+  - pattern: "yaml.load("
+    sink_type: deserialization
+  - pattern: "requests.get("
+    sink_type: ssrf
+  - pattern: "requests.post("
+    sink_type: ssrf
+  - pattern: "urllib.request.urlopen("
+    sink_type: ssrf
+
+# ── 5. Framework Detection ───────────────────────────────────────────────────
+frameworks:
+  - name: flask
+    detect_patterns: ["Flask(", "from flask import", "import flask"]
+  - name: fastapi
+    detect_patterns: ["FastAPI(", "from fastapi import", "import fastapi"]
+  - name: django
+    detect_patterns: ["from django", "import django", "DJANGO_SETTINGS_MODULE"]
+  - name: celery
+    detect_patterns: ["Celery(", "from celery import", "import celery"]
+  - name: boto3
+    detect_patterns: ["import boto3", "from boto3"]
+    note: "AWS SDK — functions calling boto3 may perform cloud actions"
+  - name: sqlalchemy
+    detect_patterns: ["from sqlalchemy", "import sqlalchemy", "create_engine("]
+    note: "ORM — DB access patterns"

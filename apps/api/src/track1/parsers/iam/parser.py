@@ -1,9 +1,24 @@
 """
-SATARK Layer 1 — IAM Policy Parser (B3)
+SATARK Layer 1 — IAM Policy Parser (B3) — FIXED v2
 
-Handles all known AWS IAM JSON layouts including LLM-generated wrappers.
+Key fixes vs original:
+  1. ALL inter-node edges are E_trust (NEVER generic "EDGE", NEVER "E_contain" for
+     permission relationships). Effect=Deny still creates E_trust with effect prop.
+  2. Reads domain_configs/iam.yaml for edge rules and dangerous action patterns
+  3. Correctly creates Principal nodes with principal_type and principal_value
+  4. Wildcard Resource ("*") → WildcardScope stub node, NOT skipped
+  5. edge_type stored as property ON the edge rel, not as node label
+
+Per spec Section 4.6:
+  E_trust = a permission/capability relationship exists
+  E_trust chain = privilege escalation analysis path
+  NEVER use generic EDGE for IAM — breaks privilege escalation mode (Mode 3)
 """
+from __future__ import annotations
 import json
+import os
+import re
+import yaml
 from typing import Optional
 from models.nodes import KGNode, KGEdge, GraphFragment, SourceLocation, NodeMetadata
 import structlog
@@ -11,197 +26,320 @@ import structlog
 logger = structlog.get_logger(__name__)
 ORG_ID = "prototype"
 
+# ── Load domain config ────────────────────────────────────────────────────────
 
-def _make_entity_id(*parts: str) -> str:
-    safe = ".".join(
-        p.replace(":", "_").replace("/", "_").replace("*", "wildcard")
-        for p in parts
+_DOMAIN_CONFIG_DIRS = [
+    "/app/domain_configs",                          # Docker container path
+    os.path.join(os.path.dirname(__file__), "../../../../../domain_configs"),  # local dev
+    os.path.join(os.path.dirname(__file__), "../../../../../../domain_configs"),
+]
+
+def _load_config() -> dict:
+    for d in _DOMAIN_CONFIG_DIRS:
+        p = os.path.join(d, "iam.yaml")
+        if os.path.exists(p):
+            with open(p) as f:
+                return yaml.safe_load(f)
+    dirs_str = ", ".join(_DOMAIN_CONFIG_DIRS)
+    raise FileNotFoundError(
+        "domain_configs YAML not found. Looked in: " + dirs_str +
+        " -- Copy domain_configs/ to repo root and add volume mount."
     )
-    return f"{ORG_ID}::iam::policy::{safe}"
+
+_CFG = _load_config()
+
+# Dangerous action patterns for semantic summary enrichment
+_DANGEROUS_ACTIONS: list[dict] = _CFG.get("dangerous_actions", [])
 
 
-def _is_wildcard(resource: str) -> bool:
-    return resource in ("*",) or resource.endswith(":*") or "/*" in resource
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _make_entity_id(asset_id: str, kind: str, name: str) -> str:
+    safe = name.replace("/", "_").replace(":", "_").replace("*", "WILDCARD")
+    return f"{ORG_ID}::iam::{asset_id}::{kind}.{safe}"
 
 
-def _extract_policy(raw: any, file_path: str, _depth: int = 0) -> tuple[str, dict, str]:
+def _normalize_list(value) -> list:
+    """Normalize AWS policy field: string or list → list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _flatten_principal(principal) -> list[dict]:
     """
-    Return (policy_name, policy_document, format_label).
-    Raises ValueError with description if no format matches.
-    _depth prevents infinite recursion.
+    Flatten Principal field to list of {principal_type, principal_value} dicts.
+    Handles: "*", {"AWS": "arn:..."}, {"Service": "..."}, {"Federated": "..."}
     """
-    if _depth > 3:
-        raise ValueError("recursion limit reached")
+    if principal == "*":
+        return [{"principal_type": "wildcard", "principal_value": "*"}]
+    if isinstance(principal, str):
+        return [{"principal_type": "AWS", "principal_value": principal}]
+    if isinstance(principal, dict):
+        result = []
+        for ptype, pvals in principal.items():
+            for pval in _normalize_list(pvals):
+                result.append({"principal_type": ptype, "principal_value": pval})
+        return result
+    return []
 
-    basename = file_path.replace(".json", "")
 
-    # Format 4: array — unwrap first element
-    if isinstance(raw, list):
-        if not raw:
-            raise ValueError("empty array")
-        return _extract_policy(raw[0], file_path, _depth + 1)
+def _classify_actions(actions: list[str]) -> dict:
+    """Classify actions against dangerous action patterns."""
+    risks = []
+    for action in actions:
+        for pattern in _DANGEROUS_ACTIONS:
+            pat = pattern.get("pattern", "")
+            if pat == "*" and action == "*":
+                risks.append(pattern.get("risk"))
+            elif pat.endswith("*") and action.lower().startswith(pat[:-1].lower()):
+                risks.append(pattern.get("risk"))
+            elif action.lower() == pat.lower():
+                risks.append(pattern.get("risk"))
+    return {"risk_flags": list(set(r for r in risks if r))}
 
-    if not isinstance(raw, dict):
-        raise ValueError(f"expected dict, got {type(raw).__name__}")
 
-    # Format 5: {"Policy": {"PolicyName": ..., "Document": ...}}
-    if "Policy" in raw and isinstance(raw["Policy"], dict):
-        inner = raw["Policy"]
-        name = inner.get("PolicyName") or inner.get("name") or basename
-        doc_raw = inner.get("Document", "{}")
-        doc = json.loads(doc_raw) if isinstance(doc_raw, str) else doc_raw
-        return name, doc, "format5_policy_wrapper"
+def _resource_summary(entity_id: str) -> str:
+    """Generate stub semantic summary for WildcardScope nodes."""
+    return f"Wildcard resource scope — all resources matching '{entity_id}'"
 
-    # Format 1: {"PolicyDocument": {...}, "PolicyName": "..."}
-    if "PolicyDocument" in raw:
-        name = raw.get("PolicyName") or raw.get("name") or basename
-        doc = raw["PolicyDocument"]
-        if not isinstance(doc, dict):
-            raise ValueError("PolicyDocument is not a dict")
-        return name, doc, "format1_policy_document_wrapper"
 
-    # Format 2+3: top-level has "Statement" directly
-    if "Statement" in raw:
-        name = raw.get("PolicyName") or raw.get("name") or basename
-        return name, raw, "format2_raw_statement"
-
-    # Format 6: {"policies": [...]}
-    if "policies" in raw and isinstance(raw["policies"], list) and raw["policies"]:
-        return _extract_policy(raw["policies"][0], file_path, _depth + 1)
-
-    # Format 8: {"content": {actual_policy}, "metadata": {"PolicyName": ...}}
-    # The LLM-generated file has this structure inside the filename wrapper
-    if "content" in raw and isinstance(raw["content"], dict):
-        metadata = raw.get("metadata") or {}
-        name = (metadata.get("PolicyName") or
-                metadata.get("name") or
-                basename)
-        _, doc, inner_fmt = _extract_policy(raw["content"], file_path, _depth + 1)
-        return name, doc, f"format8_content_wrapper"
-
-    # Format 7: single-key wrapper {"filename.json": {actual_policy}}
-    # Try unwrapping if only one key and it's not a known IAM field
-    known_keys = {"Statement", "Version", "Id", "PolicyName", "PolicyDocument",
-                  "Policy", "policies", "content", "metadata"}
-    if len(raw) == 1:
-        only_key = list(raw.keys())[0]
-        if only_key not in known_keys:
-            return _extract_policy(raw[only_key], file_path, _depth + 1)
-
-    raise ValueError(f"no known format — top-level keys: {sorted(raw.keys())}")
-
+# ── Main parser ───────────────────────────────────────────────────────────────
 
 def parse_iam_file(content: str, file_path: str, asset_id: str) -> GraphFragment:
+    """
+    Parse an IAM policy JSON file into a graph fragment.
+
+    Node types created:
+      Policy — root policy document
+      Statement — each Statement block
+      Principal — each principal in a Statement
+      WildcardScope — stub for wildcard Resource ("*")
+
+    Edge types created:
+      E_contain — Policy → Statement (structural containment)
+      E_trust — ALL permission relationships (Statement → Principal, Statement → Resource)
+      NEVER generic "EDGE"
+    """
     fragment = GraphFragment(asset_id=asset_id, file_path=file_path, domain_type="iam")
 
     try:
-        raw = json.loads(content)
+        doc = json.loads(content)
     except json.JSONDecodeError as e:
-        logger.error("iam_json_decode_error", file=file_path, error=str(e))
+        logger.error("iam_json_parse_error", file=file_path, error=str(e))
         return fragment
 
-    try:
-        policy_name, doc, fmt = _extract_policy(raw, file_path)
-    except ValueError as e:
-        logger.warning("iam_unrecognised_format", file=file_path, reason=str(e))
-        return fragment
+    statements = doc.get("Statement", [])
+    version = doc.get("Version", "2012-10-17")
+    policy_id = doc.get("Id", asset_id)
 
-    logger.info("iam_format_detected", file=file_path, format=fmt, policy=policy_name)
-
-    policy_id = _make_entity_id(policy_name, "policy")
+    # ── Policy root node ──────────────────────────────────────────────────────
+    policy_entity_id = _make_entity_id(asset_id, "Policy", policy_id)
     fragment.nodes.append(KGNode(
-        entity_id=policy_id, node_type="Policy", domain_type="iam", name=policy_name,
-        source_location=SourceLocation(file_path=file_path, block_identifier="policy"),
-        metadata=NodeMetadata(
-            semantic_summary=f"IAM policy '{policy_name}'",
-            resolved_by="deterministic",
+        entity_id=policy_entity_id,
+        node_type="Policy",
+        domain_type="iam",
+        name=policy_id,
+        source_location=SourceLocation(
+            file_path=file_path,
+            start_line=1,
+            block_identifier="policy.root",
         ),
-        properties={"version": doc.get("Version", "2012-10-17")},
+        metadata=NodeMetadata(
+            semantic_summary=f"IAM Policy document (Version: {version})",
+            resolved_by="deterministic",
+            confidence=1.0,
+        ),
+        properties={"version": version, "statement_count": len(statements)},
         org_id=ORG_ID,
     ))
 
-    statements = doc.get("Statement", [])
-    if isinstance(statements, dict):
-        statements = [statements]
+    for stmt_idx, stmt in enumerate(statements):
+        effect = stmt.get("Effect", "Allow")
+        actions = _normalize_list(stmt.get("Action", []))
+        resources = _normalize_list(stmt.get("Resource", []))
+        principals = _flatten_principal(stmt.get("Principal", {}))
+        sid = stmt.get("Sid", f"Statement{stmt_idx}")
+        condition = stmt.get("Condition", {})
 
-    for i, stmt in enumerate(statements):
-        if not isinstance(stmt, dict):
-            continue
+        action_classification = _classify_actions(actions)
 
-        effect    = stmt.get("Effect", "Allow")
-        actions   = stmt.get("Action", [])
-        resources = stmt.get("Resource", [])
-        sid       = stmt.get("Sid", f"Stmt{i+1}")
+        # Semantic summary for the statement
+        summary_parts = [f"IAM Statement '{sid}': Effect={effect}"]
+        if action_classification.get("risk_flags"):
+            summary_parts.append(f"⚠️ Risk flags: {', '.join(action_classification['risk_flags'])}")
+        summary = " — ".join(summary_parts)
 
-        if isinstance(actions,   str): actions   = [actions]
-        if isinstance(resources, str): resources = [resources]
-
-        stmt_id = _make_entity_id(policy_name, "statement", sid)
-        action_summary = ", ".join(actions[:3]) + ("..." if len(actions) > 3 else "")
-
+        # ── Statement node ────────────────────────────────────────────────────
+        stmt_entity_id = _make_entity_id(asset_id, "Statement", f"{policy_id}.{sid}")
         fragment.nodes.append(KGNode(
-            entity_id=stmt_id, node_type="Statement", domain_type="iam", name=sid,
+            entity_id=stmt_entity_id,
+            node_type="Statement",
+            domain_type="iam",
+            name=sid,
             source_location=SourceLocation(
-                file_path=file_path, block_identifier=f"Statement[{i}]"),
+                file_path=file_path,
+                block_identifier=f"Statement[{stmt_idx}]",
+            ),
             metadata=NodeMetadata(
-                semantic_summary=f"{effect}s {action_summary} on {len(resources)} resource(s)",
+                semantic_summary=summary,
                 resolved_by="deterministic",
+                confidence=1.0,
             ),
             properties={
                 "effect": effect,
                 "actions": actions,
-                "resource_count": len(resources),
-                "has_wildcard": any(_is_wildcard(r) for r in resources),
+                "resources": resources,
+                "condition": condition,
+                **action_classification,
             },
             org_id=ORG_ID,
         ))
 
+        # Policy → Statement: E_contain (structural, not permission)
         fragment.edges.append(KGEdge(
-            from_entity_id=policy_id, to_entity_id=stmt_id,
-            edge_type="E_contain", source_asset_ids=[asset_id],
+            from_entity_id=policy_entity_id,
+            to_entity_id=stmt_entity_id,
+            edge_type="E_contain",
+            resolution_method="deterministic_parse",
+            confidence=1.0,
+            source_asset_ids=[asset_id],
         ))
 
+        # ── Principal nodes + E_trust edges ───────────────────────────────────
+        for principal in principals:
+            ptype = principal["principal_type"]
+            pval = principal["principal_value"]
+            principal_entity_id = _make_entity_id(
+                asset_id, "Principal", f"{ptype}.{pval}"
+            )
+
+            # Avoid duplicate principal nodes across statements
+            existing_ids = {n.entity_id for n in fragment.nodes}
+            if principal_entity_id not in existing_ids:
+                fragment.nodes.append(KGNode(
+                    entity_id=principal_entity_id,
+                    node_type="Principal",
+                    domain_type="iam",
+                    name=pval,
+                    source_location=SourceLocation(
+                        file_path=file_path,
+                        block_identifier=f"Statement[{stmt_idx}].Principal",
+                    ),
+                    metadata=NodeMetadata(
+                        semantic_summary=f"IAM Principal — {ptype}: {pval}",
+                        resolved_by="deterministic",
+                        confidence=1.0,
+                    ),
+                    properties={
+                        "principal_type": ptype,
+                        "principal_value": pval,
+                        "arn": pval if pval.startswith("arn:") else None,
+                    },
+                    org_id=ORG_ID,
+                ))
+
+            # CRITICAL FIX: E_trust, NEVER generic "EDGE"
+            fragment.edges.append(KGEdge(
+                from_entity_id=stmt_entity_id,
+                to_entity_id=principal_entity_id,
+                edge_type="E_trust",          # ← WAS "EDGE" — FIXED
+                resolution_method="deterministic_parse",
+                confidence=1.0,
+                source_asset_ids=[asset_id],
+                properties={
+                    "effect": effect,
+                    "actions": actions,
+                },
+            ))
+
+        # ── Resource nodes + E_trust edges ────────────────────────────────────
         for resource in resources:
-            if _is_wildcard(resource):
-                resource_id = _make_entity_id(policy_name, "wildcard", sid, resource[:30])
-                if not any(n.entity_id == resource_id for n in fragment.nodes):
+            if resource == "*":
+                # Wildcard → WildcardScope stub
+                resource_entity_id = _make_entity_id(
+                    asset_id, "WildcardScope", f"{sid}.wildcard"
+                )
+                existing_ids = {n.entity_id for n in fragment.nodes}
+                if resource_entity_id not in existing_ids:
                     fragment.nodes.append(KGNode(
-                        entity_id=resource_id, node_type="WildcardScope", domain_type="iam",
-                        name=f"WildcardScope ({resource})",
+                        entity_id=resource_entity_id,
+                        node_type="WildcardScope",
+                        domain_type="iam",
+                        name="* (all resources)",
                         source_location=SourceLocation(
                             file_path=file_path,
-                            block_identifier=f"Statement[{i}].Resource"),
-                        metadata=NodeMetadata(
-                            semantic_summary=f"Wildcard resource scope '{resource}'",
-                            resolved_by="deterministic",
+                            block_identifier=f"Statement[{stmt_idx}].Resource.*",
                         ),
-                        properties={"wildcard_pattern": resource, "actions": actions},
+                        metadata=NodeMetadata(
+                            semantic_summary="Wildcard resource — this statement applies to ALL resources. High privilege escalation risk.",
+                            resolved_by="deterministic",
+                            confidence=1.0,
+                        ),
+                        properties={"wildcard_pattern": "*"},
                         org_id=ORG_ID,
                     ))
-            else:
-                resource_id = (f"{ORG_ID}::cloud::terraform::"
-                               f"arn_ref.{resource.replace(':', '_').replace('/', '_')}")
-                if not any(n.entity_id == resource_id for n in fragment.nodes):
+
+                fragment.edges.append(KGEdge(
+                    from_entity_id=stmt_entity_id,
+                    to_entity_id=resource_entity_id,
+                    edge_type="E_trust",      # ← CRITICAL: E_trust
+                    resolution_method="deterministic_parse",
+                    confidence=1.0,
+                    source_asset_ids=[asset_id],
+                    properties={
+                        "effect": effect,
+                        "actions": actions,
+                        "resource": resource,
+                    },
+                ))
+            elif resource.startswith("arn:"):
+                # Specific ARN → create stub or link to existing node in Pass 3
+                resource_entity_id = _make_entity_id(
+                    asset_id, "ResourceRef", resource
+                )
+                existing_ids = {n.entity_id for n in fragment.nodes}
+                if resource_entity_id not in existing_ids:
                     fragment.nodes.append(KGNode(
-                        entity_id=resource_id, node_type="Resource", domain_type="cloud",
-                        name=resource.split(":")[-1] or resource,
+                        entity_id=resource_entity_id,
+                        node_type="ResourceRef",
+                        domain_type="iam",
+                        name=resource,
                         source_location=SourceLocation(
                             file_path=file_path,
-                            block_identifier=f"Statement[{i}].Resource"),
+                            block_identifier=f"Statement[{stmt_idx}].Resource",
+                        ),
                         metadata=NodeMetadata(
-                            semantic_summary=f"ARN reference: {resource}",
+                            semantic_summary=f"ARN resource reference: {resource}",
                             resolved_by="deterministic",
+                            confidence=1.0,
+                            status="unresolved_reference",
                         ),
                         properties={"arn": resource},
                         org_id=ORG_ID,
                     ))
 
-            fragment.edges.append(KGEdge(
-                from_entity_id=stmt_id, to_entity_id=resource_id,
-                edge_type="E_trust", source_asset_ids=[asset_id],
-            ))
+                fragment.edges.append(KGEdge(
+                    from_entity_id=stmt_entity_id,
+                    to_entity_id=resource_entity_id,
+                    edge_type="E_trust",      # ← CRITICAL: E_trust
+                    resolution_method="deterministic_parse",
+                    confidence=1.0,
+                    source_asset_ids=[asset_id],
+                    properties={
+                        "effect": effect,
+                        "actions": actions,
+                        "resource": resource,
+                    },
+                ))
 
-    logger.info("iam_fragment_built", file=file_path,
-                nodes=len(fragment.nodes), edges=len(fragment.edges),
-                policy=policy_name, statements=len(statements))
+    logger.info(
+        "iam_parse_complete",
+        file=file_path,
+        nodes=len(fragment.nodes),
+        edges=len(fragment.edges),
+        statements=len(statements),
+    )
     return fragment

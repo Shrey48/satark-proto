@@ -1,0 +1,196 @@
+# SATARK Layer 1 — Domain Configuration: Kubernetes (B5)
+# -------------------------------------------------------
+domain: k8s
+file_extensions: [".yaml", ".yml"]
+# Note: parser must gate on presence of 'kind:' field to distinguish K8s from other YAML
+
+# ── 1. Resource Mappings ──────────────────────────────────────────────────────
+resource_mappings:
+
+  - kind: Namespace
+    node_type: Namespace
+    resource_subtype: null
+    extract_properties:
+      - labels
+      - annotations
+
+  - kind: Deployment
+    node_type: Deployment
+    resource_subtype: null
+    extract_properties:
+      - replicas
+      - labels
+      - annotations
+    # Extract pod template labels for Service→Deployment selector matching
+    extract_pod_template_labels: true
+    # Extract container ports
+    extract_container_ports: true
+    # Extract container image refs for Pass 3 E_invoke to ContainerImage
+    extract_container_images: true
+
+  - kind: StatefulSet
+    node_type: StatefulSet
+    resource_subtype: null
+    extract_properties:
+      - replicas
+      - labels
+      - annotations
+    extract_pod_template_labels: true
+    extract_container_ports: true
+    extract_container_images: true
+
+  - kind: DaemonSet
+    node_type: DaemonSet
+    resource_subtype: null
+    extract_properties:
+      - labels
+      - annotations
+    extract_pod_template_labels: true
+    extract_container_images: true
+
+  - kind: Service
+    node_type: Service
+    resource_subtype: null
+    # LoadBalancer and NodePort are entry points per spec
+    is_entry_point_types: [LoadBalancer, NodePort]
+    extract_properties:
+      - labels
+      - annotations
+    # Selector is the KEY for Pass 2 Service→Deployment linking
+    extract_selector: true       # stored as k8s_selector_app
+    extract_ports: true          # stored as ports[]
+
+  - kind: Ingress
+    node_type: Ingress
+    resource_subtype: null
+    is_entry_point: true         # Ingress is always an entry point
+    extract_properties:
+      - labels
+      - annotations
+    # Extract backend service references for Pass 3 linking
+    extract_backend_refs: true
+
+  - kind: NetworkPolicy
+    node_type: NetworkPolicy
+    resource_subtype: workload_firewall    # spec Section 3.3
+    extract_properties:
+      - labels
+      - annotations
+      - podSelector
+      - policyTypes
+    extract_rules:
+      enabled: true
+      blocks: [ingress, egress]
+
+  - kind: ServiceAccount
+    node_type: ServiceAccount
+    resource_subtype: null
+    extract_properties:
+      - labels
+      - annotations
+    # IRSA annotation → stored as irsa_role_arn for Pass 3 E_trust linking
+    extract_irsa_annotation: true   # eks.amazonaws.com/role-arn
+
+  - kind: ConfigMap
+    node_type: ConfigMap
+    resource_subtype: null
+    extract_properties:
+      - labels
+
+  - kind: Secret
+    node_type: Secret
+    resource_subtype: null
+    extract_properties:
+      - labels
+      - type            # kubernetes.io/tls, Opaque, etc.
+    # NEVER extract secret data values
+
+  - kind: Pod
+    node_type: Pod
+    resource_subtype: null
+    extract_properties:
+      - labels
+      - annotations
+    extract_container_images: true
+    extract_container_ports: true
+
+  - kind: CronJob
+    node_type: CronJob
+    resource_subtype: null
+    extract_properties:
+      - labels
+      - schedule
+
+  - kind: Job
+    node_type: Job
+    resource_subtype: null
+    extract_properties:
+      - labels
+
+  - kind: HorizontalPodAutoscaler
+    node_type: HorizontalPodAutoscaler
+    resource_subtype: null
+    extract_properties:
+      - labels
+      - minReplicas
+      - maxReplicas
+
+# ── 2. Within-asset Linking Rules (Pass 2) ───────────────────────────────────
+# These run inside the K8s parser after all nodes are created.
+within_asset_links:
+
+  - name: service_to_deployment
+    description: "Service selector matches Deployment pod template labels → E_invoke"
+    from_type: Service
+    to_type: [Deployment, StatefulSet, DaemonSet]
+    match_field: k8s_selector_app      # on Service node
+    target_field: k8s_app_label        # on Deployment node
+    match_scope: same_namespace
+    edge_type: E_invoke
+    resolution_method: deterministic_parse
+    confidence: 1.0
+
+  - name: namespace_contains_resource
+    description: "Namespace E_contain all resources in that namespace"
+    from_type: Namespace
+    to_type: "*"
+    match_field: namespace             # on any resource
+    edge_type: E_contain
+    resolution_method: deterministic_parse
+    confidence: 1.0
+
+  - name: deployment_serviceaccount
+    description: "Deployment uses ServiceAccount → E_trust"
+    from_type: [Deployment, StatefulSet, DaemonSet]
+    to_type: ServiceAccount
+    match_field: serviceAccountName    # from pod spec
+    target_field: name
+    match_scope: same_namespace
+    edge_type: E_trust
+    resolution_method: deterministic_parse
+    confidence: 1.0
+
+# ── 3. Cross-asset Linking Hints (Pass 3) ────────────────────────────────────
+# Properties that the linker should use for identifier-keyed cross-asset links.
+cross_asset_arn_properties:
+  - irsa_role_arn    # ServiceAccount → IAM Role (IRSA bridge)
+
+# ── 4. Ignore Kinds ──────────────────────────────────────────────────────────
+# K8s resource kinds that should NOT become nodes in the security KG.
+ignore_kinds:
+  - CustomResourceDefinition
+  - ClusterRole              # Handled by IAM parser path if needed
+  - ClusterRoleBinding
+  - Role
+  - RoleBinding
+  - PodDisruptionBudget
+  - ResourceQuota
+  - LimitRange
+  - StorageClass
+  - PersistentVolume
+  - PersistentVolumeClaim
+  - Endpoints
+  - EndpointSlice
+  - MutatingWebhookConfiguration
+  - ValidatingWebhookConfiguration
+  - APIService

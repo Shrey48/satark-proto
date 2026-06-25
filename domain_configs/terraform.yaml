@@ -1,0 +1,317 @@
+# SATARK Layer 1 — Domain Configuration: Terraform (B1)
+# -------------------------------------------------------
+# Scalable declarative parser config.
+# Parser reads this file instead of containing hardcoded if/else logic.
+# Add new resource types here without touching parser code.
+
+domain: cloud
+file_extensions: [".tf", ".tf.json"]
+
+# ── 1. Node Whitelist ─────────────────────────────────────────────────────────
+# Only these become graph nodes. Everything else is silently skipped.
+# resource_subtype follows spec Section 3.3.
+resource_mappings:
+
+  # Network firewalls
+  - terraform_type: aws_security_group
+    node_type: Resource
+    resource_subtype: network_firewall
+    extract_properties:
+      - tags
+      - vpc_id
+      - name            # inline name= attribute
+    extract_rules:
+      enabled: true
+      blocks: [ingress, egress]
+      # Each block → {from_port, to_port, protocol, cidr_blocks, description, direction}
+
+  - terraform_type: aws_network_acl
+    node_type: Resource
+    resource_subtype: network_firewall
+    extract_properties:
+      - tags
+      - vpc_id
+    extract_rules:
+      enabled: true
+      blocks: [ingress, egress]
+
+  - terraform_type: aws_default_security_group
+    node_type: Resource
+    resource_subtype: network_firewall
+    extract_properties:
+      - tags
+      - vpc_id
+    extract_rules:
+      enabled: true
+      blocks: [ingress, egress]
+
+  # Application firewalls (WAF)
+  - terraform_type: aws_wafv2_web_acl
+    node_type: Resource
+    resource_subtype: application_firewall
+    extract_properties:
+      - name
+      - scope           # REGIONAL or CLOUDFRONT
+      - default_action
+      - tags
+    # DO NOT extract nested rule blocks as nodes (they're in the ignore list)
+
+  # ---- aws_wafv2_web_acl_association ----------------------------------------
+  # RELATION not NODE. See relation_mappings below.
+  # NOT listed here — presence in relation_mappings is the signal.
+
+  # Compute
+  - terraform_type: aws_lambda_function
+    node_type: Resource
+    resource_subtype: null
+    is_entry_point_type: true    # Lambda public URLs checked separately
+    extract_properties:
+      - function_name
+      - runtime
+      - role            # ARN — triggers Pass 3 E_trust
+      - tags
+      - environment     # env vars dict
+
+  - terraform_type: aws_instance
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - instance_type
+      - iam_instance_profile
+      - tags
+      - vpc_security_group_ids
+
+  - terraform_type: aws_ecs_task_definition
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - family
+      - task_role_arn   # ARN — triggers Pass 3 E_trust
+      - execution_role_arn
+      - tags
+
+  # Storage
+  - terraform_type: aws_s3_bucket
+    node_type: Resource
+    resource_subtype: null
+    is_entry_point_type: true
+    extract_properties:
+      - bucket
+      - tags
+
+  - terraform_type: aws_dynamodb_table
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+      - tags
+
+  - terraform_type: aws_rds_cluster
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - cluster_identifier
+      - engine
+      - tags
+
+  # Networking / load balancing
+  - terraform_type: aws_lb
+    node_type: Resource
+    resource_subtype: null
+    is_entry_point_type: true
+    extract_properties:
+      - name
+      - internal
+      - load_balancer_type
+      - tags
+
+  - terraform_type: aws_alb
+    node_type: Resource
+    resource_subtype: null
+    is_entry_point_type: true
+    extract_properties:
+      - name
+      - internal
+      - tags
+
+  - terraform_type: aws_api_gateway_rest_api
+    node_type: Resource
+    resource_subtype: null
+    is_entry_point_type: true
+    extract_properties:
+      - name
+      - tags
+
+  - terraform_type: aws_api_gateway_v2_api
+    node_type: Resource
+    resource_subtype: null
+    is_entry_point_type: true
+    extract_properties:
+      - name
+      - protocol_type
+      - tags
+
+  - terraform_type: aws_cloudfront_distribution
+    node_type: Resource
+    resource_subtype: null
+    is_entry_point_type: true
+    extract_properties:
+      - tags
+
+  - terraform_type: aws_vpc
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - cidr_block
+      - tags
+
+  - terraform_type: aws_subnet
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - cidr_block
+      - vpc_id
+      - tags
+
+  # IAM (declared inline in Terraform)
+  - terraform_type: aws_iam_role
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+      - tags
+
+  - terraform_type: aws_iam_policy
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+      - tags
+
+  # Secrets / config
+  - terraform_type: aws_secretsmanager_secret
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+      - tags
+
+  - terraform_type: aws_ssm_parameter
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+      - type
+      - tags
+
+  # SQS / SNS (message bus — potential taint source)
+  - terraform_type: aws_sqs_queue
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+      - tags
+
+  - terraform_type: aws_sns_topic
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+      - tags
+
+  # Cognito (auth)
+  - terraform_type: aws_cognito_user_pool
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+      - tags
+
+  - terraform_type: aws_cognito_user_pool_client
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+
+  # EKS
+  - terraform_type: aws_eks_cluster
+    node_type: Resource
+    resource_subtype: null
+    extract_properties:
+      - name
+      - role_arn        # ARN — triggers Pass 3 E_trust
+      - tags
+
+# ── 2. Relation Mappings (become EDGEs, NOT nodes) ────────────────────────────
+# IMPORTANT: resources listed here must NOT appear in resource_mappings.
+# Parser checks this list first. If resource_type is here, skip node creation.
+relation_mappings:
+
+  - terraform_type: aws_wafv2_web_acl_association
+    edge_type: E_routes_to
+    # source = WAF node, resolved by web_acl_arn
+    # target = protected resource node, resolved by resource_arn
+    source_field: web_acl_arn
+    target_field: resource_arn
+    resolution_method: identifier_keyed
+    confidence: 1.0
+    # Fallback: if ARN not resolvable, look up by terraform label substring
+    fallback: name_keyed
+
+  - terraform_type: aws_iam_role_policy_attachment
+    edge_type: E_trust
+    source_field: role        # IAM role
+    target_field: policy_arn  # IAM policy
+    resolution_method: identifier_keyed
+    confidence: 1.0
+
+  - terraform_type: aws_iam_policy_attachment
+    edge_type: E_trust
+    source_field: roles       # list of roles
+    target_field: policy_arn
+    resolution_method: identifier_keyed
+    confidence: 1.0
+
+  - terraform_type: aws_lambda_permission
+    edge_type: E_invoke
+    source_field: principal   # e.g. apigateway.amazonaws.com
+    target_field: function_name
+    resolution_method: name_keyed
+    confidence: 0.9
+
+# ── 3. Ignore List ────────────────────────────────────────────────────────────
+# Nested blocks whose NAMES appear in terraform bodies.
+# These are NOT top-level resources — prevent them from becoming stub nodes.
+# Pattern: if the parser encounters a terraform resource whose type OR name
+# matches any entry here, skip silently.
+ignore_resource_types:
+  # WAF nested rule constructs
+  - managed_rule_group_statement
+  - rate_based_statement
+  - byte_match_statement
+  - sqli_match_statement
+  - xss_match_statement
+  - geo_match_statement
+  - ip_set_reference_statement
+  - regex_pattern_set_reference_statement
+  # CloudWatch / monitoring (not part of security topology)
+  - aws_cloudwatch_log_group
+  - aws_cloudwatch_metric_alarm
+  # Route53 (DNS, not topology)
+  - aws_route53_record
+  - aws_route53_zone
+  # ACM certs (referenced but not security topology nodes)
+  - aws_acm_certificate
+  - aws_acm_certificate_validation
+  # Terraform data sources (start with "data.")
+  # Handled by the parser automatically for 'data "..." "..."' blocks
+
+# ── 4. ARN Properties to Extract (triggers Pass 3 identifier-keyed linking) ──
+# Parser stamps these as top-level Neo4j properties for the linker.
+arn_properties:
+  - role              # Lambda, EC2 — role ARN
+  - execution_role_arn
+  - task_role_arn
+  - role_arn
+  - web_acl_arn       # WAF association source
+  - resource_arn      # WAF association target

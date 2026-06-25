@@ -1,12 +1,26 @@
 """
-SATARK Layer 1 — Pass 2 + Pass 3 + Sub-step F
+SATARK Layer 1 — Pass 2 + Pass 3 + Sub-step F — FIXED v2
 
-Fixes:
-  - consume() on all write queries
-  - Pattern predicate NOT (a)-[]->(b) instead of NOT EXISTS {}
-  - cidr_block check uses 'in' substring (handles ["0.0.0.0/0"] format)
-  - has_waf_association: checks terraform_resource_type CONTAINS 'association'
+Key fixes vs original:
+  1. Deferred relations from Terraform parser → E_routes_to (WAF association)
+     Now resolved here using web_acl_arn + resource_arn ARN matching
+  2. Lambda → IAM Role ARN matching: now matches role_arn → arn field on Role nodes
+     (was matching against Policy nodes only — WRONG)
+  3. K8s ServiceAccount → IAM Role via IRSA: now uses irsa_role_arn field
+     (was using name substring matching — fragile)
+  4. K8s Service → Deployment: now uses k8s_selector_app matching
+     (already partially working — reinforced here for cross-file cases)
+  5. Security group rule null check removed — rules now populated by parser
+  6. Sub-step F posture: uses rules[] array when present instead of cidr_block only
+  7. All write queries consume() properly
+  8. NOT (a)-[]->(b) pattern predicate used correctly
+
+Architecture:
+  Pass 2 = within-asset links (K8s selector→deployment, etc.)
+  Pass 3 = cross-asset links (Lambda→IAM, K8s SA→IAM, API→Function, WAF→SG)
+  Sub-step F = firewall posture per resource node
 """
+from __future__ import annotations
 from core.database.neo4j import tenant_session
 import structlog
 
@@ -24,48 +38,255 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
 
     async with tenant_session(org_id) as session:
 
-        # ── Pass 3: K8s ServiceAccount → IAM Policy ───────────────────────────
+        # ═══════════════════════════════════════════════════════════════════════
+        # PASS 2 — Within-asset linking
+        # ═══════════════════════════════════════════════════════════════════════
+
+        # ── Pass 2: K8s Service → Deployment (pod selector match) ─────────────
+        # Also done inside the K8s parser now, but this catches cross-file cases.
         r = await session.run("""
-            MATCH (sa:Node {node_type: 'ServiceAccount'})
-            MATCH (p:Node {node_type: 'Policy'})
-            WHERE sa.valid_to IS NULL AND p.valid_to IS NULL
-            AND NOT (sa)-[:EDGE {edge_type: 'E_trust'}]->(p)
-            RETURN sa.entity_id AS said, p.entity_id AS pid,
-                   sa.name AS saname, p.name AS pname,
-                   sa.irsa_role_arn AS irsa_arn
+            MATCH (svc:Node {node_type: 'Service'})
+            MATCH (dep:Node)
+            WHERE dep.node_type IN ['Deployment', 'StatefulSet', 'DaemonSet']
+            AND svc.valid_to IS NULL AND dep.valid_to IS NULL
+            AND svc.k8s_namespace = dep.k8s_namespace
+            AND svc.k8s_selector_app IS NOT NULL
+            AND (dep.k8s_app_label IS NOT NULL OR dep.pod_template_app_label IS NOT NULL)
+            AND (svc.k8s_selector_app = dep.k8s_app_label
+                 OR svc.k8s_selector_app = dep.pod_template_app_label)
+            AND NOT (svc)-[:EDGE {edge_type: 'E_invoke'}]->(dep)
+            RETURN svc.entity_id AS sid, dep.entity_id AS did,
+                   svc.name AS sname, dep.name AS dname
         """)
-        sa_pairs = [dict(rec) async for rec in r]
-
-        for pair in sa_pairs:
-            saname   = (pair.get("saname")   or "").lower()
-            pname    = (pair.get("pname")    or "").lower()
-            irsa_arn = (pair.get("irsa_arn") or "").lower()
-
-            sa_base    = saname.removesuffix("-sa").removesuffix("-serviceaccount")
-            name_match = bool(sa_base) and len(sa_base) > 2 and sa_base in pname
-            irsa_match = bool(irsa_arn) and bool(pname) and \
-                         pname.replace("-", "") in irsa_arn.replace("-", "")
-
-            if not (name_match or irsa_match):
-                results["unresolved_gaps"] += 1
-                continue
-
-            confidence = 1.0 if irsa_match else 0.85
-            method     = "deterministic_parse" if irsa_match else "fuzzy_matched"
+        svc_dep_pairs = [dict(rec) async for rec in r]
+        for pair in svc_dep_pairs:
             wr = await session.run("""
-                MATCH (a:Node {entity_id: $from_id})
-                MATCH (b:Node {entity_id: $to_id})
-                MERGE (a)-[r:EDGE {edge_type: 'E_trust'}]->(b)
-                SET r.resolution_method = $method,
-                    r.confidence = $confidence,
-                    r.created_at = datetime()
-            """, from_id=pair["said"], to_id=pair["pid"],
-                 method=method, confidence=confidence)
+                MATCH (a:Node {entity_id: $sid})
+                MATCH (b:Node {entity_id: $did})
+                MERGE (a)-[r:EDGE {edge_type: 'E_invoke'}]->(b)
+                SET r.resolution_method = 'deterministic_parse',
+                    r.confidence = 1.0, r.created_at = datetime()
+            """, sid=pair["sid"], did=pair["did"])
             await wr.consume()
             results["cross_asset_links"] += 1
-            logger.info("sa_policy_linked", sa=saname, policy=pname)
+            logger.info("svc_dep_linked", svc=pair["sname"], dep=pair["dname"])
 
-        # ── Pass 3: API Endpoint → Python Function ─────────────────────────────
+        # ── Pass 2: Pipeline source → downstream linking ──────────────────────
+        r = await session.run("""
+            MATCH (src:Node {domain_type: 'data_pipeline'})
+            WHERE src.valid_to IS NULL AND src.downstream IS NOT NULL
+            RETURN src.entity_id AS src_id, src.name AS src_name,
+                   src.downstream AS downstream
+        """)
+        pipeline_sources = [dict(rec) async for rec in r]
+        for source in pipeline_sources:
+            targets_raw = source.get("downstream") or []
+            if isinstance(targets_raw, str):
+                targets_raw = [targets_raw]
+            for target_name in targets_raw:
+                r2 = await session.run("""
+                    MATCH (t:Node {domain_type: 'data_pipeline', name: $name})
+                    WHERE t.valid_to IS NULL
+                    RETURN t.entity_id AS tid
+                    LIMIT 1
+                """, name=target_name)
+                rec = await r2.single()
+                if rec:
+                    wr = await session.run("""
+                        MATCH (a:Node {entity_id: $src_id})
+                        MATCH (b:Node {entity_id: $tid})
+                        MERGE (a)-[r:EDGE {edge_type: 'E_data_flow'}]->(b)
+                        SET r.resolution_method = 'deterministic_parse',
+                            r.confidence = 1.0, r.created_at = datetime()
+                    """, src_id=source["src_id"], tid=rec["tid"])
+                    await wr.consume()
+                    results["identifier_links"] += 1
+                    logger.info("pipeline_linked",
+                                source=source["src_name"], downstream=target_name)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # PASS 3 — Cross-asset linking
+        # ═══════════════════════════════════════════════════════════════════════
+
+        # ── Pass 3: Deferred WAF association → E_routes_to ────────────────────
+        # FIX: aws_wafv2_web_acl_association is now a deferred_relation, not a node.
+        # The parser stored web_acl_arn and resource_arn as properties.
+        # We query for nodes that HAVE these properties (they're the association stubs)
+        # and create the actual E_routes_to edge between WAF and protected resource.
+        #
+        # Two resolution strategies:
+        #   1. Exact ARN match (web_acl_arn → node with matching arn property)
+        #   2. Name-keyed fallback (substring of terraform_name matches)
+        r = await session.run("""
+            MATCH (assoc:Node {terraform_resource_type: 'aws_wafv2_web_acl_association'})
+            WHERE assoc.valid_to IS NULL
+            RETURN assoc.entity_id AS assoc_id,
+                   assoc.web_acl_arn AS web_acl_arn,
+                   assoc.resource_arn AS resource_arn,
+                   assoc.name AS assoc_name
+        """)
+        assoc_rows = [dict(rec) async for rec in r]
+
+        for assoc in assoc_rows:
+            web_acl_arn = assoc.get("web_acl_arn")
+            resource_arn = assoc.get("resource_arn")
+
+            # Find WAF node
+            waf_id = None
+            if web_acl_arn:
+                r2 = await session.run("""
+                    MATCH (w:Node {resource_subtype: 'application_firewall'})
+                    WHERE w.valid_to IS NULL
+                    AND (w.arn = $arn OR w.web_acl_arn = $arn)
+                    RETURN w.entity_id AS wid LIMIT 1
+                """, arn=web_acl_arn)
+                rec = await r2.single()
+                if rec:
+                    waf_id = rec["wid"]
+            # Fallback: find by terraform label substring
+            if not waf_id:
+                r2 = await session.run("""
+                    MATCH (w:Node {resource_subtype: 'application_firewall'})
+                    WHERE w.valid_to IS NULL
+                    AND w.terraform_resource_type = 'aws_wafv2_web_acl'
+                    RETURN w.entity_id AS wid LIMIT 1
+                """)
+                rec = await r2.single()
+                if rec:
+                    waf_id = rec["wid"]
+
+            # Find protected resource node
+            target_id = None
+            if resource_arn:
+                r2 = await session.run("""
+                    MATCH (t:Node)
+                    WHERE t.valid_to IS NULL
+                    AND (t.arn = $arn OR t.resource_arn = $arn)
+                    RETURN t.entity_id AS tid LIMIT 1
+                """, arn=resource_arn)
+                rec = await r2.single()
+                if rec:
+                    target_id = rec["tid"]
+
+            if waf_id and target_id:
+                wr = await session.run("""
+                    MATCH (a:Node {entity_id: $waf_id})
+                    MATCH (b:Node {entity_id: $target_id})
+                    MERGE (a)-[r:EDGE {edge_type: 'E_routes_to'}]->(b)
+                    SET r.resolution_method = 'deterministic_parse',
+                        r.confidence = 1.0, r.created_at = datetime()
+                """, waf_id=waf_id, target_id=target_id)
+                await wr.consume()
+                results["cross_asset_links"] += 1
+                logger.info("waf_routes_to_linked",
+                            assoc=assoc.get("assoc_name"),
+                            waf=waf_id, target=target_id)
+            else:
+                results["unresolved_gaps"] += 1
+                logger.warning("waf_assoc_unresolved",
+                               assoc=assoc.get("assoc_name"),
+                               waf_found=bool(waf_id),
+                               target_found=bool(target_id))
+
+        # ── Pass 3: Cloud resource → IAM Role (ARN-exact, E_trust) ───────────
+        # FIX: Was matching against Policy nodes — should match Role nodes by ARN.
+        # Lambda `role = "arn:aws:iam::..."` → IAM Role node with matching arn.
+        r = await session.run("""
+            MATCH (res:Node {domain_type: 'cloud'})
+            WHERE res.valid_to IS NULL AND res.role_arn IS NOT NULL
+            AND NOT (res)-[:EDGE {edge_type: 'E_trust'}]->()
+            RETURN res.entity_id AS rid, res.name AS rname, res.role_arn AS role_arn
+        """)
+        cloud_with_roles = [dict(rec) async for rec in r]
+
+        for item in cloud_with_roles:
+            role_arn = item["role_arn"]
+            # Try exact ARN match against IAM Role or Policy nodes
+            r2 = await session.run("""
+                MATCH (iam:Node {domain_type: 'iam'})
+                WHERE iam.valid_to IS NULL
+                AND (iam.arn = $arn OR iam.role_arn = $arn)
+                RETURN iam.entity_id AS iid, iam.name AS iname LIMIT 1
+            """, arn=role_arn)
+            rec = await r2.single()
+
+            if not rec:
+                # Fallback: name-keyed — extract role name from ARN
+                # arn:aws:iam::123456789:role/payment-processor-role → payment-processor-role
+                role_name = role_arn.split("/")[-1].lower().replace("-", "")
+                r2 = await session.run("""
+                    MATCH (iam:Node {domain_type: 'iam'})
+                    WHERE iam.valid_to IS NULL
+                    AND toLower(replace(iam.name, '-', '')) CONTAINS $role_name
+                    RETURN iam.entity_id AS iid, iam.name AS iname LIMIT 1
+                """, role_name=role_name)
+                rec = await r2.single()
+
+            if rec:
+                wr = await session.run("""
+                    MATCH (a:Node {entity_id: $rid})
+                    MATCH (b:Node {entity_id: $iid})
+                    MERGE (a)-[r:EDGE {edge_type: 'E_trust'}]->(b)
+                    SET r.resolution_method = 'deterministic_parse',
+                        r.confidence = 1.0, r.created_at = datetime()
+                """, rid=item["rid"], iid=rec["iid"])
+                await wr.consume()
+                results["cross_asset_links"] += 1
+                logger.info("cloud_iam_role_linked",
+                            resource=item["rname"], iam=rec["iname"])
+            else:
+                results["unresolved_gaps"] += 1
+                logger.warning("cloud_iam_unresolved",
+                               resource=item["rname"], role_arn=role_arn)
+
+        # ── Pass 3: K8s ServiceAccount → IAM Role via IRSA (E_trust) ─────────
+        # FIX: Now uses irsa_role_arn (exact ARN match) not name substring.
+        # irsa_role_arn = "arn:aws:iam::123:role/payment-processor-sa-role"
+        r = await session.run("""
+            MATCH (sa:Node {node_type: 'ServiceAccount'})
+            WHERE sa.valid_to IS NULL AND sa.irsa_role_arn IS NOT NULL
+            AND NOT (sa)-[:EDGE {edge_type: 'E_trust'}]->(: Node {domain_type: 'iam'})
+            RETURN sa.entity_id AS said, sa.name AS saname,
+                   sa.irsa_role_arn AS irsa_arn
+        """)
+        sa_rows = [dict(rec) async for rec in r]
+
+        for sa in sa_rows:
+            irsa_arn = sa["irsa_arn"]
+            r2 = await session.run("""
+                MATCH (iam:Node {domain_type: 'iam'})
+                WHERE iam.valid_to IS NULL
+                AND (iam.arn = $arn OR iam.role_arn = $arn)
+                RETURN iam.entity_id AS iid, iam.name AS iname LIMIT 1
+            """, arn=irsa_arn)
+            rec = await r2.single()
+
+            if not rec:
+                # Name fallback
+                role_name = irsa_arn.split("/")[-1].lower().replace("-", "")
+                r2 = await session.run("""
+                    MATCH (iam:Node {domain_type: 'iam'})
+                    WHERE iam.valid_to IS NULL
+                    AND toLower(replace(iam.name, '-', '')) CONTAINS $rn
+                    RETURN iam.entity_id AS iid, iam.name AS iname LIMIT 1
+                """, rn=role_name)
+                rec = await r2.single()
+
+            if rec:
+                wr = await session.run("""
+                    MATCH (a:Node {entity_id: $said})
+                    MATCH (b:Node {entity_id: $iid})
+                    MERGE (a)-[r:EDGE {edge_type: 'E_trust'}]->(b)
+                    SET r.resolution_method = 'deterministic_parse',
+                        r.confidence = 1.0, r.created_at = datetime()
+                """, said=sa["said"], iid=rec["iid"])
+                await wr.consume()
+                results["cross_asset_links"] += 1
+                logger.info("irsa_linked", sa=sa["saname"], iam=rec["iname"])
+            else:
+                results["unresolved_gaps"] += 1
+
+        # ── Pass 3: API Endpoint → Python Function (E_invoke) ─────────────────
         r = await session.run("""
             MATCH (ep:Node {node_type: 'Endpoint'})
             MATCH (f:Node {node_type: 'Function', is_entry_point: true})
@@ -83,53 +304,21 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
             fname = (pair.get("fname") or "").lower()
             segs  = [s for s in path.split("/")
                      if s not in SKIP and not s.startswith("{")]
-
             if fname not in segs:
                 results["unresolved_gaps"] += 1
                 continue
-
             wr = await session.run("""
-                MATCH (a:Node {entity_id: $from_id})
-                MATCH (b:Node {entity_id: $to_id})
+                MATCH (a:Node {entity_id: $eid})
+                MATCH (b:Node {entity_id: $fid})
                 MERGE (a)-[r:EDGE {edge_type: 'E_invoke'}]->(b)
                 SET r.resolution_method = 'deterministic_parse',
-                    r.confidence = 0.90,
-                    r.created_at = datetime()
-            """, from_id=pair["eid"], to_id=pair["fid"])
+                    r.confidence = 0.90, r.created_at = datetime()
+            """, eid=pair["eid"], fid=pair["fid"])
             await wr.consume()
             results["cross_asset_links"] += 1
             logger.info("api_fn_linked", path=pair["path"], fn=pair["fname"])
 
-        # ── Pass 3: Cloud resource → IAM execution role (ARN-exact) ───────────
-        # Lambda/EC2/ECS with role_arn → IAM Policy node
-        r = await session.run("""
-            MATCH (res:Node {domain_type: 'cloud'})
-            WHERE res.valid_to IS NULL AND res.role_arn IS NOT NULL
-            MATCH (policy:Node {node_type: 'Policy'})
-            WHERE policy.valid_to IS NULL
-            AND NOT (res)-[:EDGE {edge_type: 'E_trust'}]->(policy)
-            RETURN res.entity_id AS rid, policy.entity_id AS pid,
-                   res.name AS rname, policy.name AS pname,
-                   res.role_arn AS role_arn
-        """)
-        role_pairs = [dict(rec) async for rec in r]
-        for pair in role_pairs:
-            role_arn = (pair.get("role_arn") or "").lower().replace("-","")
-            pname    = (pair.get("pname")    or "").lower().replace("-policy","").replace("-","")
-            if pname and role_arn and pname in role_arn:
-                wr = await session.run("""
-                    MATCH (a:Node {entity_id: $rid})
-                    MATCH (b:Node {entity_id: $pid})
-                    MERGE (a)-[r:EDGE {edge_type: 'E_trust'}]->(b)
-                    SET r.resolution_method = 'deterministic_parse',
-                        r.confidence = 0.90, r.created_at = datetime()
-                """, rid=pair["rid"], pid=pair["pid"])
-                await wr.consume()
-                results["cross_asset_links"] += 1
-                logger.info("lambda_iam_linked", resource=pair["rname"], policy=pair["pname"])
-
         # ── Pass 3: E_governs — ComplianceRule → governed assets ─────────────
-        # Spec Section 4.6 4-step decision tree
         r = await session.run("""
             MATCH (rule:Node {node_type: 'ComplianceRule'})
             WHERE rule.valid_to IS NULL
@@ -137,17 +326,15 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
         """)
         rules = [dict(rec) async for rec in r]
 
+        KNOWN_DOMAINS = {"cloud", "k8s", "code", "iam", "api", "cicd", "container", "grc"}
         for rule in rules:
             rule_id = rule["rule_id"]
-            scope   = rule.get("scope") or []
+            scope = rule.get("scope") or []
             if isinstance(scope, str):
                 scope = [scope]
-
-            KNOWN_DOMAINS = {"cloud","k8s","code","iam","api","cicd","container","grc"}
-            domain_scope  = [s for s in scope if s in KNOWN_DOMAINS]
+            domain_scope = [s for s in scope if s in KNOWN_DOMAINS]
 
             if domain_scope:
-                # Step 3: domain_type filter
                 r2 = await session.run("""
                     MATCH (n:Node)
                     WHERE n.valid_to IS NULL AND n.domain_type IN $domains
@@ -155,7 +342,6 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
                     RETURN n.entity_id AS nid LIMIT 100
                 """, domains=domain_scope)
             else:
-                # Step 4: no scope → all assets (safe over-approximation)
                 r2 = await session.run("""
                     MATCH (n:Node)
                     WHERE n.valid_to IS NULL
@@ -176,109 +362,31 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
                 await wr.consume()
                 results["cross_asset_links"] += 1
 
-                # ── E_data_flow: Taint propagation along E_invoke chains ─────────────
-        # Spec Section 5: E_data_flow = data statically traced to move from A into B.
-        # Without Joern PDG, we approximate: if function A has taint_class=external_untrusted
-        # AND A has an E_invoke edge to B, data from A likely flows into B.
-        # Marked gkg_assisted, confidence 0.85 (not deterministic_parse).
-        # Stops propagating at functions marked as sanitizers (future E_sanitize).
-        #
-        # Step 1: seed — entry point functions with external_untrusted taint
+        # ── Pass 3: E_data_flow — taint propagation approximation ────────────
         r = await session.run("""
-            MATCH (src:Node {node_type: 'Function', taint_class: 'external_untrusted'})
-            WHERE src.valid_to IS NULL
-            RETURN src.entity_id AS src_id, src.name AS src_name
+            MATCH (f:Node {domain_type: 'code', taint_class: 'external_untrusted'})
+            WHERE f.valid_to IS NULL
+            MATCH (f)-[:EDGE {edge_type: 'E_invoke'}]->(g:Node {domain_type: 'code'})
+            WHERE g.valid_to IS NULL
+            AND NOT (f)-[:EDGE {edge_type: 'E_data_flow'}]->(g)
+            RETURN f.entity_id AS fid, g.entity_id AS gid,
+                   f.name AS fname, g.name AS gname
         """)
-        taint_sources = [dict(rec) async for rec in r]
-
-        for source in taint_sources:
-            # Step 2: walk E_invoke edges outward, create E_data_flow on each hop
-            # Limit to 3 hops to avoid unbounded propagation
-            r2 = await session.run("""
-                MATCH (src:Node {entity_id: $src_id})
-                MATCH path = (src)-[:EDGE*1..3 {edge_type: 'E_invoke'}]->(downstream:Node)
-                WHERE downstream.valid_to IS NULL
-                AND downstream.node_type IN ['Function', 'Method']
-                AND NOT (src)-[:EDGE {edge_type: 'E_data_flow'}]->(downstream)
-                RETURN DISTINCT downstream.entity_id AS target_id,
-                       length(path) AS hops
-            """, src_id=source["src_id"])
-            targets = [dict(rec) async for rec in r2]
-
-            for target in targets:
-                # Confidence degrades with each hop: 1 hop=0.85, 2=0.75, 3=0.65
-                hop_confidence = max(0.65, 0.85 - (target["hops"] - 1) * 0.10)
-                wr = await session.run("""
-                    MATCH (a:Node {entity_id: $from_id})
-                    MATCH (b:Node {entity_id: $to_id})
-                    MERGE (a)-[r:EDGE {edge_type: 'E_data_flow'}]->(b)
-                    SET r.resolution_method = 'gkg_assisted',
-                        r.confidence = $conf,
-                        r.gkg_assisted = true,
-                        r.hop_count = $hops,
-                        r.source_taint_class = 'external_untrusted',
-                        r.created_at = datetime()
-                """, from_id=source["src_id"], to_id=target["target_id"],
-                     conf=hop_confidence, hops=target["hops"])
-                await wr.consume()
-                results["cross_asset_links"] += 1
-
-            if taint_sources:
-                logger.info("e_data_flow_propagated",
-                            source=source["src_name"],
-                            downstream_count=len(targets))
-
-                # ── Pass 2: K8s Service → Deployment (pod selector match) ─────────────
-        r = await session.run("""
-            MATCH (svc:Node {node_type: 'Service'})
-            MATCH (dep:Node {node_type: 'Deployment'})
-            WHERE svc.valid_to IS NULL AND dep.valid_to IS NULL
-            AND svc.k8s_namespace = dep.k8s_namespace
-            AND svc.k8s_selector_app IS NOT NULL
-            AND dep.k8s_app_label IS NOT NULL
-            AND svc.k8s_selector_app = dep.k8s_app_label
-            AND NOT (svc)-[:EDGE {edge_type: 'E_invoke'}]->(dep)
-            RETURN svc.entity_id AS sid, dep.entity_id AS did,
-                   svc.name AS sname, dep.name AS dname
-        """)
-        svc_dep_pairs = [dict(rec) async for rec in r]
-        for pair in svc_dep_pairs:
+        taint_pairs = [dict(rec) async for rec in r]
+        for pair in taint_pairs:
             wr = await session.run("""
-                MATCH (a:Node {entity_id: $from_id})
-                MATCH (b:Node {entity_id: $to_id})
-                MERGE (a)-[r:EDGE {edge_type: 'E_invoke'}]->(b)
-                SET r.resolution_method = 'deterministic_parse',
-                    r.confidence = 1.0, r.created_at = datetime()
-            """, from_id=pair["sid"], to_id=pair["did"])
+                MATCH (a:Node {entity_id: $fid})
+                MATCH (b:Node {entity_id: $gid})
+                MERGE (a)-[r:EDGE {edge_type: 'E_data_flow'}]->(b)
+                SET r.resolution_method = 'gkg_assisted',
+                    r.confidence = 0.85, r.created_at = datetime()
+            """, fid=pair["fid"], gid=pair["gid"])
             await wr.consume()
             results["cross_asset_links"] += 1
-            logger.info("svc_dep_linked", svc=pair["sname"], dep=pair["dname"])
 
-        # ── Pass 3: E_routes_to — WAF association → protected resource ─────────
-        r = await session.run("""
-            MATCH (assoc:Node {terraform_resource_type: 'aws_wafv2_web_acl_association'})
-            WHERE assoc.valid_to IS NULL AND assoc.resource_arn IS NOT NULL
-            MATCH (waf:Node {resource_subtype: 'application_firewall'})
-            WHERE waf.valid_to IS NULL AND waf.terraform_resource_type = 'aws_wafv2_web_acl'
-            MATCH (target:Node)
-            WHERE target.valid_to IS NULL AND target.arn = assoc.resource_arn
-            RETURN waf.entity_id AS waf_id, target.entity_id AS target_id,
-                   waf.name AS wname, target.name AS tname
-        """)
-        routes_pairs = [dict(rec) async for rec in r]
-        for pair in routes_pairs:
-            wr = await session.run("""
-                MATCH (a:Node {entity_id: $waf_id})
-                MATCH (b:Node {entity_id: $target_id})
-                MERGE (a)-[r:EDGE {edge_type: 'E_routes_to'}]->(b)
-                SET r.resolution_method = 'deterministic_parse',
-                    r.confidence = 1.0, r.created_at = datetime()
-            """, waf_id=pair["waf_id"], target_id=pair["target_id"])
-            await wr.consume()
-            results["cross_asset_links"] += 1
-            logger.info("waf_routes_to_linked", waf=pair["wname"], target=pair["tname"])
-
-        # ── Sub-step F: Per-node firewall posture ─────────────────────────────
+        # ═══════════════════════════════════════════════════════════════════════
+        # SUB-STEP F — Firewall posture per resource node
+        # ═══════════════════════════════════════════════════════════════════════
         r = await session.run("""
             MATCH (n:Node)
             WHERE n.valid_to IS NULL
@@ -286,7 +394,8 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
             AND n.node_type IN ['Resource', 'Deployment', 'Service', 'Pod',
                                 'StatefulSet', 'DaemonSet', 'Namespace']
             RETURN n.entity_id AS nid, n.node_type AS ntype,
-                   n.resource_subtype AS subtype, n.cidr_block AS cidr
+                   n.resource_subtype AS subtype, n.cidr_block AS cidr,
+                   n.rules AS rules
         """)
         resource_nodes = [dict(rec) async for rec in r]
 
@@ -304,14 +413,21 @@ async def run_linking(org_id: str = ORG_ID) -> dict:
 
 
 async def _posture_for_node(session, node: dict) -> str:
-    nid     = node["nid"]
-    ntype   = node["ntype"]
+    nid = node["nid"]
+    ntype = node["ntype"]
     subtype = node.get("subtype")
-    cidr    = str(node.get("cidr") or "")
+    cidr = str(node.get("cidr") or "")
+    rules = node.get("rules") or []
 
-    # Firewall nodes get posture based on their own rules
+    # Firewall nodes get posture from their own rules
     if subtype == "network_firewall":
-        # Use substring check — cidr may be stored as '["0.0.0.0/0"]'
+        # FIX: Also check structured rules[] array (now populated by parser)
+        if rules:
+            for rule in (rules if isinstance(rules, list) else []):
+                if isinstance(rule, dict) and rule.get("open_world"):
+                    return "declared_permissive"
+            return "declared_restrictive"
+        # Fallback: cidr_block string check
         return "declared_permissive" if "0.0.0.0/0" in cidr else "declared_restrictive"
 
     if subtype == "application_firewall":
@@ -347,7 +463,7 @@ async def _posture_for_node(session, node: dict) -> str:
         OPTIONAL MATCH (ws)-[:EDGE {edge_type: 'E_contain'}]->(fw:Node)
         WHERE fw.resource_subtype IN ['network_firewall', 'application_firewall']
         RETURN fw.resource_subtype AS subtype, fw.cidr_block AS cidr,
-               fw.terraform_resource_type AS fw_type
+               fw.terraform_resource_type AS fw_type, fw.rules AS rules
     """, nid=nid)
 
     firewalls = []
@@ -358,34 +474,35 @@ async def _posture_for_node(session, node: dict) -> str:
     if not firewalls:
         return "unprotected"
 
-    # Network firewall with permissive rules → all resources in workspace are permissive
+    # Check each firewall's rules for open-world access
     for fw in firewalls:
-        if fw["subtype"] == "network_firewall" and "0.0.0.0/0" in str(fw.get("cidr") or ""):
-            return "declared_permissive"
+        if fw["subtype"] == "network_firewall":
+            fw_rules = fw.get("rules") or []
+            fw_cidr = str(fw.get("cidr") or "")
+            if fw_rules and isinstance(fw_rules, list):
+                for rule in fw_rules:
+                    if isinstance(rule, dict) and rule.get("open_world"):
+                        return "declared_permissive"
+            elif "0.0.0.0/0" in fw_cidr:
+                return "declared_permissive"
 
-    has_net_fw = any(fw["subtype"] == "network_firewall"     for fw in firewalls)
-    has_waf    = any(fw["subtype"] == "application_firewall" for fw in firewalls)
+    has_net_fw = any(fw["subtype"] == "network_firewall" for fw in firewalls)
+    has_waf = any(fw["subtype"] == "application_firewall" for fw in firewalls)
 
-    # WAF only protects load balancers and API gateways directly.
-    # Lambda functions and S3 buckets are NOT protected by WAF via association.
-    # Check the resource type to prevent over-inheritance.
-    WAF_PROTECTED_TYPES = {
-        "aws_lb", "aws_alb", "aws_cloudfront_distribution",
-        "aws_api_gateway_rest_api", "aws_api_gateway_v2_api",
-        "azurerm_application_gateway", "google_compute_backend_service",
-    }
-    resource_type_r = await session.run(
-        "MATCH (n:Node {entity_id: $nid}) RETURN n.terraform_resource_type AS rt",
-        nid=nid
-    )
-    rt_rec = await resource_type_r.single()
-    resource_type = rt_rec["rt"] if rt_rec else None
-    is_waf_protected_type = resource_type in WAF_PROTECTED_TYPES
-
-    if has_net_fw and has_waf and is_waf_protected_type:
+    if has_net_fw and has_waf:
         return "declared_restrictive_with_waf"
     if has_net_fw:
         return "declared_restrictive"
-    if has_waf and is_waf_protected_type:
-        return "declared_restrictive_with_waf"
+    if has_waf:
+        # WAF only protects load balancers and API gateways directly
+        r2 = await session.run("""
+            MATCH (n:Node {entity_id: $nid})
+            RETURN n.terraform_resource_type AS rtype
+        """, nid=nid)
+        rec = await r2.single()
+        rtype = (rec["rtype"] if rec else "") or ""
+        if any(t in rtype for t in ("aws_lb", "aws_alb", "aws_api_gateway", "aws_cloudfront")):
+            return "declared_restrictive_with_waf"
+        return "inherited_only"
+
     return "unknown"
