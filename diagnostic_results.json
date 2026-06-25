@@ -1,0 +1,237 @@
+{
+  "timestamp": "2026-06-25T06:23:12.403817",
+  "neo4j_uri": "bolt://localhost:7687",
+  "results": [
+    {
+      "label": "1. Domain counts (non-null domain_type)",
+      "query": "\n            MATCH (n)\n            WHERE n.domain_type IS NOT NULL\n            RETURN n.domain_type, count(n) AS count\n            ORDER BY count DESC\n        ",
+      "records": [
+        {
+          "n.domain_type": "cicd",
+          "count": 45
+        },
+        {
+          "n.domain_type": "iam",
+          "count": 31
+        },
+        {
+          "n.domain_type": "cloud",
+          "count": 28
+        },
+        {
+          "n.domain_type": "api",
+          "count": 25
+        },
+        {
+          "n.domain_type": "code",
+          "count": 21
+        },
+        {
+          "n.domain_type": "k8s",
+          "count": 15
+        },
+        {
+          "n.domain_type": "container",
+          "count": 6
+        }
+      ],
+      "count": 7
+    },
+    {
+      "label": "2. resource_subtype nodes",
+      "query": "\n            MATCH (n)\n            WHERE n.resource_subtype IS NOT NULL\n            RETURN n.name, n.resource_subtype, n.domain_type\n            ORDER BY n.resource_subtype\n        ",
+      "records": [
+        {
+          "n.name": "payments_waf",
+          "n.resource_subtype": "application_firewall",
+          "n.domain_type": "cloud"
+        },
+        {
+          "n.name": "payments-app-sg",
+          "n.resource_subtype": "network_firewall",
+          "n.domain_type": "cloud"
+        },
+        {
+          "n.name": "payments-lb-sg",
+          "n.resource_subtype": "network_firewall",
+          "n.domain_type": "cloud"
+        },
+        {
+          "n.name": "payments-bastion-sg",
+          "n.resource_subtype": "network_firewall",
+          "n.domain_type": "cloud"
+        },
+        {
+          "n.name": "payments-api-netpol",
+          "n.resource_subtype": "workload_firewall",
+          "n.domain_type": "k8s"
+        },
+        {
+          "n.name": "payments-worker-netpol",
+          "n.resource_subtype": "workload_firewall",
+          "n.domain_type": "k8s"
+        }
+      ],
+      "count": 6
+    },
+    {
+      "label": "3. E_routes_to edges",
+      "query": "\n            MATCH (a)-[r:E_routes_to]->(b)\n            RETURN a.name, b.name, r.resolution_method\n        ",
+      "records": [],
+      "count": 0
+    },
+    {
+      "label": "4. E_trust from IAM Role (domain_type: iam, node_type: Resource, terraform_resource_type: aws_iam_role)",
+      "query": "\n            MATCH (a:Node {domain_type: \"iam\"})-[r:E_trust]->(b)\n            WHERE a.node_type = \"Resource\" AND a.terraform_resource_type = \"aws_iam_role\"\n            RETURN a.name, b.name, r.resolution_method\n        ",
+      "records": [],
+      "count": 0
+    },
+    {
+      "label": "5. E_trust from ServiceAccount (IRSA) to IAM Role",
+      "query": "\n            MATCH (a:ServiceAccount)-[r:E_trust]->(b:Resource)\n            WHERE a.irsa_role_arn IS NOT NULL\n            RETURN a.name, a.irsa_role_arn, b.name, r.resolution_method\n        ",
+      "records": [],
+      "count": 0
+    },
+    {
+      "label": "6. E_invoke edges from payments_app.py",
+      "query": "\n            MATCH (a:Function)-[r:E_invoke]->(b:Function)\n            WHERE a.file_path = \"payments_app.py\"\n            RETURN a.name, b.name, r.resolution_method\n        ",
+      "records": [],
+      "count": 0
+    },
+    {
+      "label": "7. Duplicate nodes (same name, multiple entity_ids)",
+      "query": "\n            MATCH (n)\n            WITH n.name AS name, collect(n.entity_id) AS eids, count(n) AS cnt\n            WHERE cnt > 1\n            RETURN name, eids, cnt\n            ORDER BY cnt DESC\n        ",
+      "records": [
+        {
+          "name": "* (all resources)",
+          "eids": [
+            "prototype::iam::iam-iam_full-a3acd1e1::WildcardScope.AllowEC2Read.wildcard",
+            "prototype::iam::iam-iam_full-a3acd1e1::WildcardScope.AllowRDSRead.wildcard",
+            "prototype::iam::iam-iam_full-a3acd1e1::WildcardScope.AllowWAFRead.wildcard",
+            "prototype::iam::iam-iam_full-a3acd1e1::WildcardScope.DenySensitiveActions.wildcard"
+          ],
+          "cnt": 4
+        },
+        {
+          "name": "requestBody",
+          "eids": [
+            "prototype::api::payments_platform_api::param._payments_process.post.body",
+            "prototype::api::payments_platform_api::param._payments_refund.post.body",
+            "prototype::api::payments_platform_api::param._webhooks_payments.post.body"
+          ],
+          "cnt": 3
+        },
+        {
+          "name": "Checkout code",
+          "eids": [
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.job.security_scan.step.0",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.job.test.step.0",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.job.build.step.0"
+          ],
+          "cnt": 3
+        },
+        {
+          "name": "Configure AWS credentials",
+          "eids": [
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.job.build.step.2",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.job.deploy_staging.step.0",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.job.deploy_production.step.0"
+          ],
+          "cnt": 3
+        },
+        {
+          "name": "aws-secret-access-key",
+          "eids": [
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.build.aws_secret_access_key",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.deploy_staging.aws_secret_access_key",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.deploy_production.aws_secret_access_key"
+          ],
+          "cnt": 3
+        },
+        {
+          "name": "aws-region",
+          "eids": [
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.build.aws_region",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.deploy_staging.aws_region",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.deploy_production.aws_region"
+          ],
+          "cnt": 3
+        },
+        {
+          "name": "aws-access-key-id",
+          "eids": [
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.build.aws_access_key_id",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.deploy_staging.aws_access_key_id",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.deploy_production.aws_access_key_id"
+          ],
+          "cnt": 3
+        },
+        {
+          "name": "process_payment",
+          "eids": [
+            "prototype::cloud::terraform::aws_lambda_function.process_payment",
+            "prototype::code::repo::payments_app.function.process_payment"
+          ],
+          "cnt": 2
+        },
+        {
+          "name": "payments-api",
+          "eids": [
+            "prototype::k8s::cluster::production.deployment.payments-api",
+            "prototype::container::image::container-docker-compose-7a8d673a.service.payments-api"
+          ],
+          "cnt": 2
+        },
+        {
+          "name": "payments-worker",
+          "eids": [
+            "prototype::k8s::cluster::production.deployment.payments-worker",
+            "prototype::container::image::container-docker-compose-7a8d673a.service.payments-worker"
+          ],
+          "cnt": 2
+        },
+        {
+          "name": "monitoring",
+          "eids": [
+            "prototype::k8s::cluster::production.deployment.monitoring",
+            "prototype::container::image::container-docker-compose-7a8d673a.service.monitoring"
+          ],
+          "cnt": 2
+        },
+        {
+          "name": "id",
+          "eids": [
+            "prototype::api::payments_platform_api::param._payments_id.get.id",
+            "prototype::api::payments_platform_api::param._payments_id_status.get.id"
+          ],
+          "cnt": 2
+        },
+        {
+          "name": "inline_secret_in_run",
+          "eids": [
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.deploy_production.inline_secret_in_run",
+            "prototype::cicd::pipeline::payments_service_ci_cd_pipeline.secret.clean_up.inline_secret_in_run"
+          ],
+          "cnt": 2
+        }
+      ],
+      "count": 13
+    },
+    {
+      "label": "8. Existence of payments_waf_assoc node (should be 0)",
+      "query": "\n            MATCH (n)\n            WHERE n.name = \"payments_waf_assoc\"\n            RETURN n\n        ",
+      "records": [],
+      "count": 0
+    },
+    {
+      "label": "9. Count of nodes with domain_type = null (should be 0 after cleanup)",
+      "query": "\n            MATCH (n)\n            WHERE n.domain_type IS NULL\n            RETURN count(n) AS null_domain_count\n        ",
+      "records": [
+        {
+          "null_domain_count": 60
+        }
+      ],
+      "count": 1
+    }
+  ]
+}
